@@ -570,8 +570,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
     .toolbar-actions { display: flex; gap: 8px; }
     .room-layout {
       position: relative;
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 340px;
+      display: block;
       align-items: stretch;
       min-height: min(680px, calc(100dvh - 172px));
       overflow: hidden;
@@ -584,8 +583,15 @@ PAGE_TEMPLATE = r"""<!doctype html>
       position: relative;
       min-width: 0;
       min-height: 420px;
+      width: 100%;
       background: #050608;
       overflow: hidden;
+      transform-origin: left center;
+      transition: width .28s ease, transform .28s ease;
+    }
+    .room-layout.chat-open .video-stage {
+      width: calc(100% - min(380px, 34vw) + 34px);
+      transform: translateX(-10px);
     }
     #youtube-player,
     #youtube-player iframe {
@@ -643,13 +649,26 @@ PAGE_TEMPLATE = r"""<!doctype html>
     }
     .stage-button:hover { background: rgba(37, 41, 47, .92); }
     .chat-panel {
+      position: absolute;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      width: min(380px, 34vw);
       min-width: 0;
       min-height: 0;
       display: flex;
       flex-direction: column;
       border-left: 1px solid var(--line);
-      background: var(--surface);
+      background: rgba(18, 20, 24, .96);
+      box-shadow: -14px 0 40px rgba(0, 0, 0, .25);
       z-index: 5;
+      transform: translateX(100%);
+      pointer-events: none;
+      transition: transform .28s ease;
+    }
+    .chat-panel.is-open {
+      transform: translateX(0);
+      pointer-events: auto;
     }
     .chat-header {
       min-height: 58px;
@@ -660,6 +679,25 @@ PAGE_TEMPLATE = r"""<!doctype html>
       padding: 0 15px;
       border-bottom: 1px solid var(--line);
       flex: 0 0 auto;
+    }
+    .chat-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+    .chat-close {
+      height: 30px;
+      padding: 0 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      color: var(--muted);
+      background: rgba(255,255,255,.04);
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .chat-close:hover {
+      color: var(--text);
+      background: rgba(255,255,255,.1);
     }
     .chat-title {
       margin: 0;
@@ -783,19 +821,26 @@ PAGE_TEMPLATE = r"""<!doctype html>
       box-shadow: none;
       background: #000;
     }
-    .room-layout:fullscreen .video-stage { height: 100%; min-height: 0; }
+    .room-layout:fullscreen .video-stage {
+      height: 100%;
+      min-height: 0;
+      width: 100%;
+    }
+    .room-layout:fullscreen.chat-open .video-stage {
+      width: calc(100% - min(420px, 34vw) + 42px);
+    }
     .room-layout:fullscreen .chat-panel {
-      position: absolute;
       top: 0;
       right: 0;
       bottom: 0;
-      width: min(360px, 35vw);
+      width: min(420px, 34vw);
       border-left: 1px solid rgba(255,255,255,.14);
       box-shadow: -12px 0 40px rgba(0,0,0,.3);
     }
-    .room-layout:fullscreen .chat-panel:not(.is-open) { display: none; }
     @media (max-width: 940px) {
-      .room-layout { grid-template-columns: minmax(0, 1fr) 290px; }
+      .room-layout.chat-open .video-stage {
+        width: calc(100% - min(340px, 36vw) + 28px);
+      }
     }
     @media (max-width: 720px) {
       .topbar { min-height: 56px; padding: 10px 14px; }
@@ -815,22 +860,25 @@ PAGE_TEMPLATE = r"""<!doctype html>
         height: min(66vw, 58dvh);
         min-height: 230px;
         aspect-ratio: 16 / 9;
+        width: 100% !important;
+        transform: none !important;
       }
       .chat-panel {
-        position: absolute;
         right: 0;
         bottom: 0;
         left: 0;
+        top: auto;
+        width: auto;
         height: min(43%, 360px);
         min-height: 190px;
         border-top: 1px solid rgba(255,255,255,.18);
         border-left: 0;
         background: rgba(18, 20, 24, .95);
         box-shadow: 0 -12px 35px rgba(0,0,0,.28);
-        transform: translateY(0);
+        transform: translateY(100%);
         transition: transform .22s ease;
       }
-      .chat-panel:not(.is-open) { transform: translateY(100%); }
+      .chat-panel.is-open { transform: translateY(0); }
       .chat-header { min-height: 48px; padding: 0 12px; }
       .stage-controls { opacity: 1; transform: none; right: 10px; bottom: 10px; }
       .room-layout:fullscreen .chat-panel {
@@ -844,8 +892,8 @@ PAGE_TEMPLATE = r"""<!doctype html>
         border-left: 0;
         box-shadow: 0 -12px 35px rgba(0,0,0,.28);
       }
-      .room-layout:fullscreen .chat-panel:not(.is-open) { display: flex; transform: translateY(100%); }
       .room-layout:fullscreen .chat-panel.is-open { transform: translateY(0); }
+      .chat-close { height: 28px; padding: 0 8px; }
       .nickname-form { flex-direction: column; }
       .nickname-form .button { width: 100%; }
     }
@@ -885,7 +933,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
         </div>
       </div>
 
-      <section class="room-layout" id="room-layout" aria-label="Watch Together room">
+      <section class="room-layout chat-open" id="room-layout" aria-label="Watch Together room">
         <div class="video-stage" id="video-stage">
           <div id="youtube-player"></div>
           <div class="video-placeholder" id="video-placeholder">
@@ -903,7 +951,11 @@ PAGE_TEMPLATE = r"""<!doctype html>
         <aside class="chat-panel is-open" id="chat-panel" aria-label="Room chat">
           <div class="chat-header">
             <h2 class="chat-title">Chat</h2>
-            <div class="online-count" id="online-count">0 online</div>
+            <div class="chat-header-actions">
+              <div class="online-count" id="online-count">0 online</div>
+              <button class="chat-close" id="chat-close" type="button"
+                      aria-label="Close chat">Close</button>
+            </div>
           </div>
           <div class="chat-messages" id="chat-messages" aria-live="polite">
             <div class="chat-empty" id="chat-empty">No messages yet. Say hello when everyone is ready.</div>
@@ -953,6 +1005,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
       const chatPanel = document.getElementById("chat-panel");
       const chatToggle = document.getElementById("chat-toggle");
       const stageChat = document.getElementById("stage-chat");
+      const chatClose = document.getElementById("chat-close");
       const fullscreenToggle = document.getElementById("fullscreen-toggle");
       const stageFullscreen = document.getElementById("stage-fullscreen");
       const roomLayout = document.getElementById("room-layout");
@@ -992,6 +1045,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
 
       function setChatOpen(open) {
         chatPanel.classList.toggle("is-open", open);
+        roomLayout.classList.toggle("chat-open", open);
         chatToggle.setAttribute("aria-expanded", String(open));
         chatToggle.textContent = open ? "Close chat" : "Chat";
         stageChat.textContent = open ? "Close chat" : "Chat";
@@ -1328,6 +1382,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
       }
       chatToggle.addEventListener("click", toggleChat);
       stageChat.addEventListener("click", toggleChat);
+      chatClose.addEventListener("click", () => setChatOpen(false));
 
       async function toggleFullscreen() {
         try {

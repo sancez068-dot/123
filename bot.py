@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 app = FastAPI(
     title="Watch Together",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -31,7 +31,7 @@ app.add_middleware(
 
 
 # ============================================================
-# DATA
+# MODELS
 # ============================================================
 
 @dataclass
@@ -102,18 +102,6 @@ def clean_nickname(value: Any) -> str:
 
 
 def extract_youtube_id(value: Any) -> str | None:
-    """
-    Accepts:
-
-    https://www.youtube.com/watch?v=XXXXXXXXXXX
-    https://youtu.be/XXXXXXXXXXX
-    https://www.youtube.com/embed/XXXXXXXXXXX
-    https://www.youtube.com/shorts/XXXXXXXXXXX
-    https://www.youtube.com/live/XXXXXXXXXXX
-
-    Also accepts a direct 11-character YouTube ID.
-    """
-
     value = str(value or "").strip()
 
     if not value:
@@ -146,7 +134,7 @@ def extract_youtube_id(value: Any) -> str | None:
     return None
 
 
-def get_participants(room: Room) -> list[dict[str, str]]:
+def participants(room: Room) -> list[dict[str, str]]:
     return [
         {
             "id": client.client_id,
@@ -156,7 +144,7 @@ def get_participants(room: Room) -> list[dict[str, str]]:
     ]
 
 
-def get_full_state(room: Room) -> dict[str, Any]:
+def full_state(room: Room) -> dict[str, Any]:
     return {
         "type": "full_state",
         "room": room.room_id,
@@ -166,12 +154,12 @@ def get_full_state(room: Room) -> dict[str, Any]:
             room.current_position(),
             3,
         ),
-        "participants": get_participants(room),
+        "participants": participants(room),
         "chat": room.chat[-100:],
     }
 
 
-async def send_json(
+async def safe_send(
     websocket: WebSocket,
     data: dict[str, Any],
 ) -> bool:
@@ -187,33 +175,40 @@ async def broadcast(
     data: dict[str, Any],
     exclude: str | None = None,
 ) -> None:
-    dead_clients: list[str] = []
 
-    for client_id, client in list(room.clients.items()):
+    dead: list[str] = []
+
+    for client_id, client in list(
+        room.clients.items()
+    ):
+
         if client_id == exclude:
             continue
 
-        success = await send_json(
+        ok = await safe_send(
             client.websocket,
             data,
         )
 
-        if not success:
-            dead_clients.append(client_id)
+        if not ok:
+            dead.append(client_id)
 
-    for client_id in dead_clients:
+    for client_id in dead:
         room.clients.pop(
             client_id,
             None,
         )
 
 
-async def broadcast_participants(room: Room) -> None:
+async def broadcast_participants(
+    room: Room,
+) -> None:
+
     await broadcast(
         room,
         {
             "type": "participants",
-            "participants": get_participants(room),
+            "participants": participants(room),
         },
     )
 
@@ -224,6 +219,7 @@ async def broadcast_participants(room: Room) -> None:
 
 HTML = r"""
 <!DOCTYPE html>
+
 <html lang="en">
 
 <head>
@@ -232,10 +228,16 @@ HTML = r"""
 
 <meta
     name="viewport"
-    content="width=device-width, initial-scale=1.0"
+    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+>
+
+<meta
+    name="theme-color"
+    content="#080808"
 >
 
 <title>Watch Together</title>
+
 
 <style>
 
@@ -248,15 +250,21 @@ body {
     width: 100%;
     height: 100%;
     margin: 0;
+    padding: 0;
+
+    background: #080808;
+    color: white;
+
+    font-family:
+        Inter,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Arial,
+        sans-serif;
 }
 
 body {
-    background: #080808;
-    color: #ffffff;
-    font-family:
-        Inter,
-        Arial,
-        sans-serif;
     overflow: hidden;
 }
 
@@ -269,20 +277,29 @@ button {
     cursor: pointer;
 }
 
+
+/* ============================================================
+   APP
+   ============================================================ */
+
 #app {
     width: 100%;
-    height: 100%;
+    height: 100dvh;
 
     display: flex;
     flex-direction: column;
+
+    background: #080808;
 }
 
 
-/* HEADER */
+/* ============================================================
+   HEADER
+   ============================================================ */
 
 .header {
-    height: 60px;
-    min-height: 60px;
+    height: 58px;
+    min-height: 58px;
 
     display: flex;
     align-items: center;
@@ -291,7 +308,9 @@ button {
 
     background: #101010;
 
-    border-bottom: 1px solid #252525;
+    border-bottom: 1px solid #242424;
+
+    z-index: 20;
 }
 
 .logo {
@@ -300,7 +319,7 @@ button {
 }
 
 .logo span {
-    color: #777777;
+    color: #777;
     font-weight: 500;
 }
 
@@ -309,27 +328,35 @@ button {
 
     display: flex;
     align-items: center;
-    gap: 8px;
+
+    gap: 7px;
 }
 
 .room {
-    color: #888888;
-    font-size: 12px;
+    color: #777;
+
+    font-size: 11px;
 }
 
 .room strong {
-    color: #ffffff;
+    color: #fff;
 }
 
 .icon-button {
-    width: 40px;
-    height: 40px;
+    width: 39px;
+    height: 39px;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    padding: 0;
 
     border: 1px solid #292929;
     border-radius: 9px;
 
     background: #191919;
-    color: #ffffff;
+    color: white;
 }
 
 .icon-button:hover {
@@ -337,39 +364,56 @@ button {
 }
 
 
-/* MAIN */
+/* ============================================================
+   MAIN
+   ============================================================ */
 
 .main {
+    position: relative;
+
     flex: 1;
     min-height: 0;
 
     display: flex;
 
-    position: relative;
+    background: #000;
 }
 
 .video-section {
+    position: relative;
+
     flex: 1;
     min-width: 0;
+    min-height: 0;
 
     display: flex;
     flex-direction: column;
+
+    background: #000;
 }
 
 
-/* PLAYER */
+/* ============================================================
+   PLAYER
+   ============================================================ */
 
 .player-container {
+    position: relative;
+
     width: 100%;
 
     aspect-ratio: 16 / 9;
 
-    background: #000000;
+    background: #000;
 
-    position: relative;
+    overflow: hidden;
 }
 
 #player {
+    position: absolute;
+
+    inset: 0;
+
     width: 100%;
     height: 100%;
 }
@@ -387,8 +431,9 @@ button {
 
     text-align: center;
 
-    background: #0b0b0b;
-    color: #777777;
+    color: #777;
+
+    background: #090909;
 
     pointer-events: none;
 }
@@ -398,7 +443,9 @@ button {
 }
 
 
-/* VIDEO INPUT */
+/* ============================================================
+   VIDEO BAR
+   ============================================================ */
 
 .video-bar {
     display: flex;
@@ -407,13 +454,14 @@ button {
 
     padding: 10px;
 
-    background: #111111;
+    background: #111;
 
-    border-bottom: 1px solid #252525;
+    border-bottom: 1px solid #242424;
 }
 
 .video-input {
     flex: 1;
+
     min-width: 0;
 
     height: 42px;
@@ -423,54 +471,49 @@ button {
     border: 1px solid #292929;
     border-radius: 9px;
 
-    background: #090909;
-    color: #ffffff;
-
     outline: none;
+
+    background: #080808;
+    color: white;
 }
 
 .video-input:focus {
-    border-color: #444444;
+    border-color: #444;
 }
 
 .load-button {
     height: 42px;
 
-    padding: 0 18px;
+    padding: 0 17px;
 
     border: 0;
     border-radius: 9px;
 
-    background: #ffffff;
-    color: #000000;
+    background: white;
+    color: black;
 
     font-weight: 700;
 }
 
 
-/* CHAT */
+/* ============================================================
+   DESKTOP CHAT
+   ============================================================ */
 
-.chat {
+.desktop-chat {
     width: 340px;
     min-width: 340px;
 
     display: flex;
     flex-direction: column;
 
-    background: #111111;
+    background: #111;
 
-    border-left: 1px solid #252525;
-
-    transition:
-        width 0.25s ease,
-        min-width 0.25s ease;
+    border-left: 1px solid #242424;
 }
 
-.chat.closed {
-    width: 0;
-    min-width: 0;
-
-    overflow: hidden;
+.desktop-chat.hidden {
+    display: none;
 }
 
 .chat-header {
@@ -480,9 +523,9 @@ button {
     display: flex;
     align-items: center;
 
-    padding: 0 10px 0 14px;
+    padding: 0 12px;
 
-    border-bottom: 1px solid #252525;
+    border-bottom: 1px solid #242424;
 }
 
 .chat-title {
@@ -492,7 +535,7 @@ button {
 .chat-online {
     margin-top: 2px;
 
-    color: #777777;
+    color: #777;
 
     font-size: 11px;
 }
@@ -507,22 +550,40 @@ button {
 
     overflow-y: auto;
 
-    padding: 13px;
+    padding: 12px;
 }
 
 .message {
     margin-bottom: 13px;
+
+    animation: messageIn .12s ease;
+}
+
+@keyframes messageIn {
+
+    from {
+        opacity: 0;
+        transform: translateY(3px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 .message-author {
-    margin-bottom: 3px;
+    margin-bottom: 2px;
 
-    color: #888888;
+    color: #aaa;
 
     font-size: 12px;
+    font-weight: 600;
 }
 
 .message-text {
+    color: #eee;
+
     font-size: 14px;
     line-height: 1.4;
 
@@ -536,11 +597,12 @@ button {
 
     padding: 10px;
 
-    border-top: 1px solid #252525;
+    border-top: 1px solid #242424;
 }
 
 .chat-input {
     flex: 1;
+
     min-width: 0;
 
     height: 40px;
@@ -550,10 +612,10 @@ button {
     border: 1px solid #292929;
     border-radius: 8px;
 
-    background: #090909;
-    color: #ffffff;
-
     outline: none;
+
+    background: #080808;
+    color: white;
 }
 
 .send {
@@ -562,18 +624,183 @@ button {
     border: 0;
     border-radius: 8px;
 
-    background: #ffffff;
-    color: #000000;
+    background: white;
+    color: black;
 
     font-weight: 800;
 }
 
 
-/* FOOTER */
+/* ============================================================
+   MOBILE TWITCH CHAT
+   ============================================================ */
+
+.mobile-chat {
+    position: absolute;
+
+    left: 0;
+    right: 0;
+    bottom: 0;
+
+    z-index: 15;
+
+    display: none;
+
+    flex-direction: column;
+
+    pointer-events: none;
+}
+
+.mobile-chat.visible {
+    display: flex;
+}
+
+.mobile-messages {
+    max-height: 45vh;
+
+    padding: 12px 12px 70px;
+
+    overflow: hidden;
+
+    mask-image:
+        linear-gradient(
+            to bottom,
+            transparent 0%,
+            black 15%,
+            black 100%
+        );
+
+    -webkit-mask-image:
+        linear-gradient(
+            to bottom,
+            transparent 0%,
+            black 15%,
+            black 100%
+        );
+}
+
+.mobile-message {
+    width: fit-content;
+    max-width: 90%;
+
+    margin-top: 5px;
+    margin-bottom: 5px;
+
+    color: white;
+
+    font-size: 14px;
+    line-height: 1.35;
+
+    text-shadow:
+        0 1px 2px rgba(0,0,0,.95),
+        0 0 4px rgba(0,0,0,.8);
+
+    animation: messageIn .12s ease;
+}
+
+.mobile-message-author {
+    color: #ddd;
+
+    font-weight: 700;
+}
+
+.mobile-message-text {
+    color: white;
+}
+
+
+/* ============================================================
+   MOBILE CHAT INPUT
+   ============================================================ */
+
+.mobile-chat-input {
+    position: absolute;
+
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+
+    z-index: 30;
+
+    display: none;
+
+    gap: 7px;
+
+    pointer-events: auto;
+}
+
+.mobile-chat-input.visible {
+    display: flex;
+}
+
+.mobile-chat-input input {
+    flex: 1;
+
+    min-width: 0;
+
+    height: 42px;
+
+    padding: 0 12px;
+
+    border: 1px solid rgba(255,255,255,.15);
+    border-radius: 21px;
+
+    outline: none;
+
+    background: rgba(15,15,15,.9);
+    color: white;
+
+    backdrop-filter: blur(10px);
+}
+
+.mobile-send {
+    width: 42px;
+    height: 42px;
+
+    border: 0;
+    border-radius: 50%;
+
+    background: white;
+    color: black;
+
+    font-weight: 800;
+}
+
+
+/* ============================================================
+   MOBILE CHAT TOP BUTTON
+   ============================================================ */
+
+.mobile-chat-close {
+    position: absolute;
+
+    right: 10px;
+    top: 10px;
+
+    z-index: 30;
+
+    width: 38px;
+    height: 38px;
+
+    display: none;
+
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 50%;
+
+    background: rgba(0,0,0,.6);
+    color: white;
+
+    backdrop-filter: blur(8px);
+}
+
+
+/* ============================================================
+   FOOTER
+   ============================================================ */
 
 .footer {
-    height: 48px;
-    min-height: 48px;
+    height: 46px;
+    min-height: 46px;
 
     display: flex;
     align-items: center;
@@ -582,7 +809,7 @@ button {
 
     background: #101010;
 
-    border-top: 1px solid #252525;
+    border-top: 1px solid #242424;
 }
 
 .status {
@@ -591,7 +818,7 @@ button {
 
     gap: 7px;
 
-    color: #888888;
+    color: #777;
 
     font-size: 12px;
 }
@@ -612,13 +839,15 @@ button {
 .users {
     margin-left: auto;
 
-    color: #888888;
+    color: #777;
 
     font-size: 12px;
 }
 
 
-/* MODAL */
+/* ============================================================
+   MODAL
+   ============================================================ */
 
 .modal {
     position: fixed;
@@ -633,7 +862,7 @@ button {
 
     padding: 20px;
 
-    background: rgba(0, 0, 0, 0.82);
+    background: rgba(0,0,0,.86);
 }
 
 .modal.hidden {
@@ -658,7 +887,7 @@ button {
 .modal-description {
     margin: 0 0 18px;
 
-    color: #777777;
+    color: #777;
 
     font-size: 14px;
 }
@@ -673,10 +902,10 @@ button {
     border: 1px solid #292929;
     border-radius: 9px;
 
-    background: #090909;
-    color: #ffffff;
-
     outline: none;
+
+    background: #080808;
+    color: white;
 }
 
 .join {
@@ -689,14 +918,16 @@ button {
     border: 0;
     border-radius: 9px;
 
-    background: #ffffff;
-    color: #000000;
+    background: white;
+    color: black;
 
     font-weight: 700;
 }
 
 
-/* TOAST */
+/* ============================================================
+   TOAST
+   ============================================================ */
 
 .toast {
     position: fixed;
@@ -710,19 +941,19 @@ button {
 
     border-radius: 8px;
 
-    background: #ffffff;
-    color: #000000;
+    background: white;
+    color: black;
 
     font-size: 13px;
 
     opacity: 0;
 
+    pointer-events: none;
+
     transform:
         translate(-50%, 10px);
 
-    pointer-events: none;
-
-    transition: 0.2s ease;
+    transition: .2s ease;
 }
 
 .toast.show {
@@ -733,51 +964,190 @@ button {
 }
 
 
-/* MOBILE */
+/* ============================================================
+   MOBILE
+   ============================================================ */
 
 @media (max-width: 800px) {
+
+    .header {
+        height: 52px;
+        min-height: 52px;
+
+        padding: 0 10px;
+    }
+
+    .logo {
+        font-size: 15px;
+    }
 
     .room {
         display: none;
     }
 
-    .chat {
-        position: absolute;
-
-        right: 0;
-        top: 0;
-        bottom: 0;
-
-        width: min(350px, 92vw);
-        min-width: min(350px, 92vw);
-
-        z-index: 50;
-
-        box-shadow:
-            -20px 0 50px rgba(0,0,0,.5);
-
-        transition:
-            transform .25s ease;
+    .main {
+        display: block;
     }
 
-    .chat.closed {
-        width: min(350px, 92vw);
-        min-width: min(350px, 92vw);
+    .video-section {
+        width: 100%;
+        height: 100%;
+    }
 
-        transform: translateX(105%);
+    .player-container {
+        aspect-ratio: auto;
+
+        width: 100%;
+        height: auto;
+
+        flex: 0 0 auto;
     }
 
     .video-bar {
-        flex-wrap: wrap;
+        padding: 8px;
     }
 
     .video-input {
-        width: 100%;
-        flex-basis: 100%;
+        height: 40px;
     }
 
     .load-button {
-        flex: 1;
+        height: 40px;
+    }
+
+    .desktop-chat {
+        display: none !important;
+    }
+
+    .mobile-chat {
+        display: none;
+    }
+
+    .mobile-chat.visible {
+        display: flex;
+    }
+
+    .mobile-chat-close {
+        display: block;
+    }
+
+    .footer {
+        display: none;
+    }
+}
+
+
+/* ============================================================
+   LANDSCAPE PHONE
+   ============================================================ */
+
+@media (
+    max-width: 900px
+) and (
+    orientation: landscape
+) {
+
+    #app {
+        height: 100dvh;
+    }
+
+    .header {
+        display: none;
+    }
+
+    .video-section {
+        width: 100%;
+        height: 100%;
+    }
+
+    .player-container {
+        width: 100%;
+        height: 100%;
+
+        aspect-ratio: auto;
+    }
+
+    .video-bar {
+        position: absolute;
+
+        left: 0;
+        right: 0;
+        bottom: 0;
+
+        z-index: 12;
+
+        opacity: 0;
+
+        transition: opacity .2s;
+
+        background:
+            linear-gradient(
+                transparent,
+                rgba(0,0,0,.9)
+            );
+
+        border: 0;
+    }
+
+    .video-section:hover .video-bar,
+    .video-bar:focus-within {
+        opacity: 1;
+    }
+
+    .footer {
+        display: none;
+    }
+
+    .mobile-messages {
+        max-height: 55vh;
+    }
+}
+
+
+/* ============================================================
+   FULLSCREEN
+   ============================================================ */
+
+.player-container:fullscreen {
+    width: 100vw;
+    height: 100vh;
+
+    background: black;
+}
+
+.player-container:-webkit-full-screen {
+    width: 100vw;
+    height: 100vh;
+
+    background: black;
+}
+
+.player-container:fullscreen #player,
+.player-container:-webkit-full-screen #player {
+    width: 100%;
+    height: 100%;
+}
+
+.player-container:fullscreen .mobile-chat,
+.player-container:-webkit-full-screen .mobile-chat {
+    display: flex;
+}
+
+
+/* ============================================================
+   SAFE AREA
+   ============================================================ */
+
+@supports (
+    padding: env(safe-area-inset-bottom)
+) {
+
+    .mobile-chat-input {
+        bottom:
+            calc(
+                10px +
+                env(safe-area-inset-bottom)
+            );
     }
 }
 
@@ -785,9 +1155,12 @@ button {
 
 </head>
 
+
 <body>
 
+
 <div id="app">
+
 
     <header class="header">
 
@@ -795,25 +1168,32 @@ button {
             Watch<span>Together</span>
         </div>
 
+
         <div class="header-right">
 
             <div class="room">
                 ROOM:
-                <strong id="roomCode">------</strong>
+                <strong id="roomCode">
+                    ------
+                </strong>
             </div>
+
 
             <button
                 id="copyButton"
                 class="icon-button"
                 type="button"
+                aria-label="Copy room"
             >
                 🔗
             </button>
+
 
             <button
                 id="chatButton"
                 class="icon-button"
                 type="button"
+                aria-label="Chat"
             >
                 💬
             </button>
@@ -825,24 +1205,84 @@ button {
 
     <main class="main">
 
+
         <section class="video-section">
 
-            <div class="player-container">
+
+            <div
+                id="playerContainer"
+                class="player-container"
+            >
 
                 <div id="player"></div>
+
 
                 <div
                     id="placeholder"
                     class="placeholder"
                 >
+
                     <div>
+
                         <strong>
                             No video loaded
                         </strong>
+
                         <br>
+
                         Paste a YouTube link below
+
                     </div>
+
                 </div>
+
+
+                <!-- TWITCH STYLE CHAT -->
+
+                <div
+                    id="mobileChat"
+                    class="mobile-chat"
+                >
+
+                    <button
+                        id="mobileChatClose"
+                        class="mobile-chat-close"
+                        type="button"
+                    >
+                        ×
+                    </button>
+
+
+                    <div
+                        id="mobileMessages"
+                        class="mobile-messages"
+                    ></div>
+
+
+                    <form
+                        id="mobileChatForm"
+                        class="mobile-chat-input"
+                    >
+
+                        <input
+                            id="mobileChatInput"
+                            maxlength="500"
+                            placeholder="Send a message..."
+                            autocomplete="off"
+                        >
+
+
+                        <button
+                            class="mobile-send"
+                            type="submit"
+                        >
+                            ↑
+                        </button>
+
+                    </form>
+
+                </div>
+
 
             </div>
 
@@ -857,6 +1297,7 @@ button {
                     autocomplete="off"
                 >
 
+
                 <button
                     id="loadButton"
                     class="load-button"
@@ -867,12 +1308,15 @@ button {
 
             </div>
 
+
         </section>
 
 
+        <!-- DESKTOP CHAT -->
+
         <aside
-            id="chat"
-            class="chat"
+            id="desktopChat"
+            class="desktop-chat hidden"
         >
 
             <div class="chat-header">
@@ -884,14 +1328,20 @@ button {
                     </div>
 
                     <div class="chat-online">
-                        <span id="onlineCount">0</span>
+
+                        <span id="onlineCount">
+                            0
+                        </span>
+
                         online
+
                     </div>
 
                 </div>
 
+
                 <button
-                    id="closeChat"
+                    id="desktopChatClose"
                     class="icon-button chat-close"
                     type="button"
                 >
@@ -902,23 +1352,24 @@ button {
 
 
             <div
-                id="messages"
+                id="desktopMessages"
                 class="messages"
             ></div>
 
 
             <form
-                id="chatForm"
+                id="desktopChatForm"
                 class="chat-form"
             >
 
                 <input
-                    id="chatInput"
+                    id="desktopChatInput"
                     class="chat-input"
                     maxlength="500"
                     placeholder="Message..."
                     autocomplete="off"
                 >
+
 
                 <button
                     class="send"
@@ -930,6 +1381,7 @@ button {
             </form>
 
         </aside>
+
 
     </main>
 
@@ -949,15 +1401,24 @@ button {
 
         </div>
 
+
         <div class="users">
+
             👥
-            <span id="usersCount">0</span>
+
+            <span id="usersCount">
+                0
+            </span>
+
         </div>
 
     </footer>
 
+
 </div>
 
+
+<!-- NICKNAME -->
 
 <div
     id="nicknameModal"
@@ -974,6 +1435,7 @@ button {
             Choose your nickname.
         </p>
 
+
         <input
             id="nicknameInput"
             class="nickname"
@@ -981,6 +1443,7 @@ button {
             placeholder="Nickname"
             autocomplete="off"
         >
+
 
         <button
             id="joinButton"
@@ -1015,11 +1478,17 @@ button {
    STATE
    ============================================================ */
 
-const roomId =
+const pathParts =
     location.pathname
         .split("/")
-        .filter(Boolean)[1]
-        ?.toUpperCase() || null;
+        .filter(Boolean);
+
+
+const roomId =
+    pathParts[0] === "r"
+        ? pathParts[1]?.toUpperCase()
+        : null;
+
 
 let socket = null;
 
@@ -1037,36 +1506,63 @@ let suppressUntil = 0;
 
 let lastPosition = 0;
 
+let lastServerPosition = 0;
+
 let lastSentSeek = -1;
+
+let lastServerSync = 0;
+
+let mobileChatOpen = false;
 
 
 /* ============================================================
    DOM
    ============================================================ */
 
-const chat =
-    document.getElementById("chat");
+const desktopChat =
+    document.getElementById(
+        "desktopChat"
+    );
 
-const messages =
-    document.getElementById("messages");
+const mobileChat =
+    document.getElementById(
+        "mobileChat"
+    );
 
-const chatInput =
-    document.getElementById("chatInput");
+const mobileMessages =
+    document.getElementById(
+        "mobileMessages"
+    );
 
-const videoInput =
-    document.getElementById("videoInput");
+const desktopMessages =
+    document.getElementById(
+        "desktopMessages"
+    );
 
 const placeholder =
-    document.getElementById("placeholder");
+    document.getElementById(
+        "placeholder"
+    );
 
-const modal =
-    document.getElementById("nicknameModal");
+const nicknameModal =
+    document.getElementById(
+        "nicknameModal"
+    );
 
 const nicknameInput =
-    document.getElementById("nicknameInput");
+    document.getElementById(
+        "nicknameInput"
+    );
 
 const toast =
-    document.getElementById("toast");
+    document.getElementById(
+        "toast"
+    );
+
+const videoInput =
+    document.getElementById(
+        "videoInput"
+    );
 
 
 document.getElementById(
@@ -1085,12 +1581,19 @@ function showToast(text) {
 
     toast.classList.add("show");
 
-    setTimeout(
-        function () {
-            toast.classList.remove("show");
-        },
-        2200
+    clearTimeout(
+        showToast.timer
     );
+
+    showToast.timer =
+        setTimeout(
+            function () {
+                toast.classList.remove(
+                    "show"
+                );
+            },
+            2200
+        );
 }
 
 
@@ -1110,10 +1613,12 @@ function setConnection(connected) {
             "statusText"
         );
 
+
     dot.classList.toggle(
         "offline",
         !connected
     );
+
 
     text.textContent =
         connected
@@ -1135,6 +1640,7 @@ function send(data) {
     ) {
         return false;
     }
+
 
     try {
 
@@ -1162,13 +1668,17 @@ function updateParticipants(list) {
             ? list.length
             : 0;
 
+
     document.getElementById(
         "onlineCount"
-    ).textContent = count;
+    ).textContent =
+        count;
+
 
     document.getElementById(
         "usersCount"
-    ).textContent = count;
+    ).textContent =
+        count;
 }
 
 
@@ -1176,57 +1686,156 @@ function updateParticipants(list) {
    CHAT
    ============================================================ */
 
-function clearMessages() {
-    messages.innerHTML = "";
-}
-
-
-function addMessage(message) {
+function addDesktopMessage(message) {
 
     const wrapper =
-        document.createElement("div");
+        document.createElement(
+            "div"
+        );
 
     wrapper.className =
         "message";
 
 
     const author =
-        document.createElement("div");
+        document.createElement(
+            "div"
+        );
 
     author.className =
         "message-author";
 
     author.textContent =
-        message.nickname || "Guest";
+        message.nickname ||
+        "Guest";
 
 
     const text =
-        document.createElement("div");
+        document.createElement(
+            "div"
+        );
 
     text.className =
         "message-text";
 
     text.textContent =
-        message.text || "";
+        message.text ||
+        "";
 
 
-    wrapper.appendChild(author);
+    wrapper.appendChild(
+        author
+    );
 
-    wrapper.appendChild(text);
+    wrapper.appendChild(
+        text
+    );
 
-    messages.appendChild(wrapper);
 
-    messages.scrollTop =
-        messages.scrollHeight;
+    desktopMessages.appendChild(
+        wrapper
+    );
+
+
+    desktopMessages.scrollTop =
+        desktopMessages.scrollHeight;
+}
+
+
+function addMobileMessage(message) {
+
+    const wrapper =
+        document.createElement(
+            "div"
+        );
+
+    wrapper.className =
+        "mobile-message";
+
+
+    const author =
+        document.createElement(
+            "span"
+        );
+
+    author.className =
+        "mobile-message-author";
+
+    author.textContent =
+        (
+            message.nickname ||
+            "Guest"
+        ) + ": ";
+
+
+    const text =
+        document.createElement(
+            "span"
+        );
+
+    text.className =
+        "mobile-message-text";
+
+    text.textContent =
+        message.text ||
+        "";
+
+
+    wrapper.appendChild(
+        author
+    );
+
+    wrapper.appendChild(
+        text
+    );
+
+
+    mobileMessages.appendChild(
+        wrapper
+    );
+
+
+    while (
+        mobileMessages.children.length >
+        30
+    ) {
+
+        mobileMessages.removeChild(
+            mobileMessages.firstChild
+        );
+    }
+}
+
+
+function addMessage(message) {
+
+    addDesktopMessage(
+        message
+    );
+
+    addMobileMessage(
+        message
+    );
+}
+
+
+function clearMessages() {
+
+    desktopMessages.innerHTML =
+        "";
+
+    mobileMessages.innerHTML =
+        "";
 }
 
 
 /* ============================================================
-   YOUTUBE
+   YOUTUBE API
    ============================================================ */
 
 window.onYouTubeIframeAPIReady =
     function () {
+
         createPlayer();
     };
 
@@ -1237,12 +1846,14 @@ function createPlayer() {
         return;
     }
 
+
     if (
         !window.YT ||
         !window.YT.Player
     ) {
         return;
     }
+
 
     player =
         new YT.Player(
@@ -1256,7 +1867,8 @@ function createPlayer() {
                     controls: 1,
                     rel: 0,
                     playsinline: 1,
-                    modestbranding: 1
+                    modestbranding: 1,
+                    enablejsapi: 1
                 },
 
                 events: {
@@ -1282,7 +1894,7 @@ function onPlayerReady() {
 
 
 /* ============================================================
-   YOUTUBE STATE
+   PLAYER STATE
    ============================================================ */
 
 function onPlayerStateChange(event) {
@@ -1291,6 +1903,7 @@ function onPlayerStateChange(event) {
         return;
     }
 
+
     if (
         Date.now() <
         suppressUntil
@@ -1298,12 +1911,19 @@ function onPlayerStateChange(event) {
         return;
     }
 
-    if (!player) {
+
+    let position = 0;
+
+    try {
+
+        position =
+            player.getCurrentTime() ||
+            0;
+
+    } catch (error) {
+
         return;
     }
-
-    const position =
-        player.getCurrentTime() || 0;
 
 
     if (
@@ -1315,6 +1935,7 @@ function onPlayerStateChange(event) {
             type: "play",
             position: position
         });
+
 
     } else if (
         event.data ===
@@ -1334,7 +1955,7 @@ function onPlayerStateChange(event) {
 
 
 /* ============================================================
-   APPLY FULL STATE
+   APPLY SERVER STATE
    ============================================================ */
 
 function applyFullState(data) {
@@ -1346,17 +1967,25 @@ function applyFullState(data) {
 
     clearMessages();
 
+
     for (
         const message
-        of (data.chat || [])
+        of (
+            data.chat ||
+            []
+        )
     ) {
-        addMessage(message);
+
+        addMessage(
+            message
+        );
     }
 
 
     if (!data.video_id) {
 
-        currentVideoId = "";
+        currentVideoId =
+            "";
 
         placeholder.classList.remove(
             "hidden"
@@ -1382,189 +2011,87 @@ function applyFullState(data) {
     const videoId =
         data.video_id;
 
+
     const position =
         Number(
             data.position || 0
         );
 
 
+    const playing =
+        Boolean(
+            data.playing
+        );
+
+
+    currentVideoId =
+        videoId;
+
+
+    lastServerPosition =
+        position;
+
+
+    lastServerSync =
+        Date.now();
+
+
     suppressUntil =
-        Date.now() + 1500;
+        Date.now() + 1800;
 
 
-    if (
-        currentVideoId !==
-        videoId
-    ) {
-
-        currentVideoId =
-            videoId;
-
+    try {
 
         player.loadVideoById({
             videoId: videoId,
             startSeconds: position
         });
 
+    } catch (error) {
 
-        setTimeout(
-            function () {
+        return;
+    }
 
-                if (!player) {
-                    return;
-                }
 
-                suppressUntil =
-                    Date.now() + 1000;
+    setTimeout(
+        function () {
 
-                if (data.playing) {
+            if (!player) {
+                return;
+            }
+
+
+            suppressUntil =
+                Date.now() + 1500;
+
+
+            try {
+
+                player.seekTo(
+                    position,
+                    true
+                );
+
+
+                if (playing) {
+
                     player.playVideo();
+
                 } else {
+
                     player.pauseVideo();
                 }
-            },
-            600
-        );
 
-    } else {
-
-        const localPosition =
-            player.getCurrentTime() || 0;
+            } catch (error) {
+            }
 
 
-        if (
-            Math.abs(
-                localPosition - position
-            ) > 1.25
-        ) {
+            lastPosition =
+                position;
 
-            player.seekTo(
-                position,
-                true
-            );
-        }
-
-
-        if (data.playing) {
-            player.playVideo();
-        } else {
-            player.pauseVideo();
-        }
-    }
-
-
-    lastPosition =
-        position;
-}
-
-
-/* ============================================================
-   REMOTE PLAY
-   ============================================================ */
-
-function remotePlay(position) {
-
-    if (
-        !playerReady ||
-        !player
-    ) {
-        return;
-    }
-
-    suppressUntil =
-        Date.now() + 1000;
-
-
-    const local =
-        player.getCurrentTime() || 0;
-
-
-    if (
-        Math.abs(
-            local - position
-        ) > 1.25
-    ) {
-
-        player.seekTo(
-            position,
-            true
-        );
-    }
-
-
-    player.playVideo();
-
-    lastPosition =
-        position;
-}
-
-
-/* ============================================================
-   REMOTE PAUSE
-   ============================================================ */
-
-function remotePause(position) {
-
-    if (
-        !playerReady ||
-        !player
-    ) {
-        return;
-    }
-
-    suppressUntil =
-        Date.now() + 1000;
-
-
-    const local =
-        player.getCurrentTime() || 0;
-
-
-    if (
-        Math.abs(
-            local - position
-        ) > 1.25
-    ) {
-
-        player.seekTo(
-            position,
-            true
-        );
-    }
-
-
-    player.pauseVideo();
-
-    lastPosition =
-        position;
-}
-
-
-/* ============================================================
-   REMOTE SEEK
-   ============================================================ */
-
-function remoteSeek(position) {
-
-    if (
-        !playerReady ||
-        !player
-    ) {
-        return;
-    }
-
-    suppressUntil =
-        Date.now() + 800;
-
-
-    player.seekTo(
-        position,
-        true
+        },
+        700
     );
-
-
-    lastPosition =
-        position;
 }
 
 
@@ -1581,8 +2108,10 @@ function remoteVideo(videoId) {
         return;
     }
 
+
     currentVideoId =
         videoId;
+
 
     placeholder.classList.add(
         "hidden"
@@ -1590,16 +2119,173 @@ function remoteVideo(videoId) {
 
 
     suppressUntil =
-        Date.now() + 1500;
+        Date.now() + 1800;
 
 
-    player.loadVideoById({
-        videoId: videoId,
-        startSeconds: 0
-    });
+    try {
+
+        player.loadVideoById({
+            videoId: videoId,
+            startSeconds: 0
+        });
+
+    } catch (error) {
+    }
 
 
     lastPosition = 0;
+
+    lastServerPosition = 0;
+}
+
+
+/* ============================================================
+   REMOTE PLAY
+   ============================================================ */
+
+function remotePlay(position) {
+
+    if (
+        !playerReady ||
+        !player
+    ) {
+        return;
+    }
+
+
+    suppressUntil =
+        Date.now() + 1500;
+
+
+    try {
+
+        const local =
+            player.getCurrentTime() ||
+            0;
+
+
+        if (
+            Math.abs(
+                local - position
+            ) > 0.8
+        ) {
+
+            player.seekTo(
+                position,
+                true
+            );
+        }
+
+
+        player.playVideo();
+
+    } catch (error) {
+    }
+
+
+    lastPosition =
+        position;
+
+    lastServerPosition =
+        position;
+
+    lastServerSync =
+        Date.now();
+}
+
+
+/* ============================================================
+   REMOTE PAUSE
+   ============================================================ */
+
+function remotePause(position) {
+
+    if (
+        !playerReady ||
+        !player
+    ) {
+        return;
+    }
+
+
+    suppressUntil =
+        Date.now() + 1500;
+
+
+    try {
+
+        const local =
+            player.getCurrentTime() ||
+            0;
+
+
+        if (
+            Math.abs(
+                local - position
+            ) > 0.8
+        ) {
+
+            player.seekTo(
+                position,
+                true
+            );
+        }
+
+
+        player.pauseVideo();
+
+    } catch (error) {
+    }
+
+
+    lastPosition =
+        position;
+
+    lastServerPosition =
+        position;
+
+    lastServerSync =
+        Date.now();
+}
+
+
+/* ============================================================
+   REMOTE SEEK
+   ============================================================ */
+
+function remoteSeek(position) {
+
+    if (
+        !playerReady ||
+        !player
+    ) {
+        return;
+    }
+
+
+    suppressUntil =
+        Date.now() + 1200;
+
+
+    try {
+
+        player.seekTo(
+            position,
+            true
+        );
+
+    } catch (error) {
+    }
+
+
+    lastPosition =
+        position;
+
+    lastServerPosition =
+        position;
+
+    lastServerSync =
+        Date.now();
 }
 
 
@@ -1609,7 +2295,10 @@ function remoteVideo(videoId) {
 
 function handleMessage(data) {
 
-    if (!data || !data.type) {
+    if (
+        !data ||
+        !data.type
+    ) {
         return;
     }
 
@@ -1618,7 +2307,9 @@ function handleMessage(data) {
 
         case "full_state":
 
-            applyFullState(data);
+            applyFullState(
+                data
+            );
 
             break;
 
@@ -1636,7 +2327,8 @@ function handleMessage(data) {
 
             remotePlay(
                 Number(
-                    data.position || 0
+                    data.position ||
+                    0
                 )
             );
 
@@ -1647,7 +2339,8 @@ function handleMessage(data) {
 
             remotePause(
                 Number(
-                    data.position || 0
+                    data.position ||
+                    0
                 )
             );
 
@@ -1658,7 +2351,8 @@ function handleMessage(data) {
 
             remoteSeek(
                 Number(
-                    data.position || 0
+                    data.position ||
+                    0
                 )
             );
 
@@ -1677,7 +2371,8 @@ function handleMessage(data) {
         case "participants":
 
             updateParticipants(
-                data.participants || []
+                data.participants ||
+                []
             );
 
             break;
@@ -1719,7 +2414,8 @@ function connect() {
 
 
     const protocol =
-        location.protocol === "https:"
+        location.protocol ===
+            "https:"
             ? "wss:"
             : "ws:";
 
@@ -1743,6 +2439,7 @@ function connect() {
 
             setConnection(true);
 
+
             send({
                 type: "join",
                 nickname: nickname
@@ -1760,7 +2457,10 @@ function connect() {
                         event.data
                     );
 
-                handleMessage(data);
+
+                handleMessage(
+                    data
+                );
 
             } catch (error) {
 
@@ -1783,6 +2483,7 @@ function connect() {
 
             setConnection(false);
 
+
             clearTimeout(
                 reconnectTimer
             );
@@ -1791,7 +2492,9 @@ function connect() {
             reconnectTimer =
                 setTimeout(
                     function () {
+
                         connect();
+
                     },
                     2000
                 );
@@ -1866,42 +2569,74 @@ videoInput.addEventListener(
 
 
 /* ============================================================
-   CHAT
+   CHAT SEND
    ============================================================ */
 
+function sendChat(
+    input
+) {
+
+    const text =
+        input.value.trim();
+
+
+    if (!text) {
+        return;
+    }
+
+
+    send({
+        type: "chat",
+        text: text
+    });
+
+
+    input.value = "";
+
+    input.focus();
+}
+
+
+/* DESKTOP */
+
 document.getElementById(
-    "chatForm"
+    "desktopChatForm"
 ).addEventListener(
     "submit",
     function (event) {
 
         event.preventDefault();
 
-
-        const text =
-            chatInput.value.trim();
-
-
-        if (!text) {
-            return;
-        }
-
-
-        send({
-            type: "chat",
-            text: text
-        });
+        sendChat(
+            document.getElementById(
+                "desktopChatInput"
+            )
+        );
+    }
+);
 
 
-        chatInput.value = "";
+/* MOBILE */
 
-        chatInput.focus();
+document.getElementById(
+    "mobileChatForm"
+).addEventListener(
+    "submit",
+    function (event) {
+
+        event.preventDefault();
+
+        sendChat(
+            document.getElementById(
+                "mobileChatInput"
+            )
+        );
     }
 );
 
 
 /* ============================================================
-   CHAT BUTTONS
+   DESKTOP CHAT
    ============================================================ */
 
 document.getElementById(
@@ -1910,21 +2645,98 @@ document.getElementById(
     "click",
     function () {
 
-        chat.classList.toggle(
-            "closed"
-        );
+        if (
+            window.innerWidth <= 800
+        ) {
+
+            toggleMobileChat();
+
+        } else {
+
+            desktopChat.classList.toggle(
+                "hidden"
+            );
+        }
     }
 );
 
 
 document.getElementById(
-    "closeChat"
+    "desktopChatClose"
 ).addEventListener(
     "click",
     function () {
 
-        chat.classList.add(
-            "closed"
+        desktopChat.classList.add(
+            "hidden"
+        );
+    }
+);
+
+
+/* ============================================================
+   MOBILE CHAT
+   ============================================================ */
+
+function toggleMobileChat() {
+
+    mobileChatOpen =
+        !mobileChatOpen;
+
+
+    mobileChat.classList.toggle(
+        "visible",
+        mobileChatOpen
+    );
+
+
+    const input =
+        document.querySelector(
+            ".mobile-chat-input"
+        );
+
+
+    input.classList.toggle(
+        "visible",
+        mobileChatOpen
+    );
+
+
+    if (mobileChatOpen) {
+
+        setTimeout(
+            function () {
+
+                document.getElementById(
+                    "mobileChatInput"
+                ).focus();
+
+            },
+            200
+        );
+    }
+}
+
+
+document.getElementById(
+    "mobileChatClose"
+).addEventListener(
+    "click",
+    function () {
+
+        mobileChatOpen =
+            false;
+
+
+        mobileChat.classList.remove(
+            "visible"
+        );
+
+
+        document.querySelector(
+            ".mobile-chat-input"
+        ).classList.remove(
+            "visible"
         );
     }
 );
@@ -1946,6 +2758,7 @@ document.getElementById(
                 location.href
             );
 
+
             showToast(
                 "Room link copied"
             );
@@ -1961,7 +2774,7 @@ document.getElementById(
 
 
 /* ============================================================
-   SEEK DETECTION
+   SEEK SYNC
    ============================================================ */
 
 setInterval(
@@ -1992,7 +2805,7 @@ setInterval(
         }
 
 
-        let position;
+        let position = 0;
 
         let state;
 
@@ -2000,7 +2813,8 @@ setInterval(
         try {
 
             position =
-                player.getCurrentTime() || 0;
+                player.getCurrentTime() ||
+                0;
 
             state =
                 player.getPlayerState();
@@ -2011,7 +2825,18 @@ setInterval(
         }
 
 
-        const difference =
+        /*
+         * Detect manual seek.
+         *
+         * During normal playback the position
+         * changes by roughly 0.5 sec between
+         * checks.
+         *
+         * A larger jump means the user
+         * dragged the YouTube timeline.
+         */
+
+        const delta =
             Math.abs(
                 position -
                 lastPosition
@@ -2019,7 +2844,7 @@ setInterval(
 
 
         if (
-            difference > 1.5 &&
+            delta > 1.7 &&
             (
                 state ===
                     YT.PlayerState.PLAYING ||
@@ -2040,6 +2865,7 @@ setInterval(
                     position: position
                 });
 
+
                 lastSentSeek =
                     position;
             }
@@ -2051,6 +2877,47 @@ setInterval(
 
     },
     500
+);
+
+
+/* ============================================================
+   PERIODIC RESYNC
+   ============================================================ */
+
+/*
+ * Every few seconds ask the server for
+ * the authoritative room state.
+ *
+ * This fixes small differences between
+ * phones/computers caused by network latency.
+ */
+
+setInterval(
+    function () {
+
+        if (
+            !socket ||
+            socket.readyState !==
+                WebSocket.OPEN
+        ) {
+            return;
+        }
+
+
+        if (
+            !playerReady ||
+            !player
+        ) {
+            return;
+        }
+
+
+        send({
+            type: "sync"
+        });
+
+    },
+    4000
 );
 
 
@@ -2082,7 +2949,7 @@ function joinRoom() {
     );
 
 
-    modal.classList.add(
+    nicknameModal.classList.add(
         "hidden"
     );
 
@@ -2124,8 +2991,7 @@ function start() {
 
     if (!roomId) {
 
-        location.href =
-            "/";
+        location.href = "/";
 
         return;
     }
@@ -2138,12 +3004,13 @@ function start() {
 
 
     if (saved) {
+
         nicknameInput.value =
             saved;
     }
 
 
-    modal.classList.remove(
+    nicknameModal.classList.remove(
         "hidden"
     );
 
@@ -2169,14 +3036,16 @@ start();
 
 
 # ============================================================
-# HTTP ROUTES
+# HTTP
 # ============================================================
 
 @app.get("/")
 async def root() -> RedirectResponse:
+
     room_id = generate_room_id()
 
     async with rooms_lock:
+
         rooms[room_id] = Room(
             room_id=room_id
         )
@@ -2191,14 +3060,18 @@ async def root() -> RedirectResponse:
     "/r/{room_id}",
     response_class=HTMLResponse,
 )
-async def room_page(room_id: str) -> HTMLResponse:
+async def room_page(
+    room_id: str,
+) -> HTMLResponse:
 
     room_id = room_id.upper()
+
 
     if not re.fullmatch(
         r"[A-Z0-9]{4,20}",
         room_id,
     ):
+
         return HTMLResponse(
             "<h1>Invalid room ID</h1>",
             status_code=400,
@@ -2208,12 +3081,15 @@ async def room_page(room_id: str) -> HTMLResponse:
     async with rooms_lock:
 
         if room_id not in rooms:
+
             rooms[room_id] = Room(
                 room_id=room_id
             )
 
 
-    return HTMLResponse(HTML)
+    return HTMLResponse(
+        HTML
+    )
 
 
 # ============================================================
@@ -2230,12 +3106,17 @@ async def websocket_endpoint(
 
     await websocket.accept()
 
-    room_id = room_id.upper()
+
+    room_id =
+        room_id.upper()
 
 
     async with rooms_lock:
 
-        room = rooms.get(room_id)
+        room = rooms.get(
+            room_id
+        )
+
 
         if room is None:
 
@@ -2246,20 +3127,18 @@ async def websocket_endpoint(
             rooms[room_id] = room
 
 
-    client_id = generate_client_id()
-
-    client: Client | None = None
+    client_id =
+        generate_client_id()
 
 
     try:
 
         # ----------------------------------------------------
-        # JOIN MESSAGE
+        # JOIN
         # ----------------------------------------------------
 
-        first_message = (
+        first_message =
             await websocket.receive_json()
-        )
 
 
         if (
@@ -2267,11 +3146,12 @@ async def websocket_endpoint(
             != "join"
         ):
 
-            await send_json(
+            await safe_send(
                 websocket,
                 {
                     "type": "error",
-                    "message": "Join required",
+                    "message":
+                        "Join required",
                 },
             )
 
@@ -2280,31 +3160,35 @@ async def websocket_endpoint(
             return
 
 
-        nickname = clean_nickname(
-            first_message.get(
-                "nickname",
-                "Guest",
+        nickname =
+            clean_nickname(
+                first_message.get(
+                    "nickname",
+                    "Guest",
+                )
             )
-        )
 
 
-        client = Client(
-            websocket=websocket,
-            client_id=client_id,
-            nickname=nickname,
-        )
+        client =
+            Client(
+                websocket=websocket,
+                client_id=client_id,
+                nickname=nickname,
+            )
 
 
-        room.clients[client_id] = client
+        room.clients[
+            client_id
+        ] = client
 
 
         # ----------------------------------------------------
-        # SEND CURRENT STATE
+        # CURRENT STATE
         # ----------------------------------------------------
 
-        await send_json(
+        await safe_send(
             websocket,
-            get_full_state(room),
+            full_state(room),
         )
 
 
@@ -2314,33 +3198,31 @@ async def websocket_endpoint(
 
 
         # ----------------------------------------------------
-        # MESSAGE LOOP
+        # LOOP
         # ----------------------------------------------------
 
         while True:
 
-            data = (
+            data =
                 await websocket.receive_json()
-            )
 
 
-            message_type = data.get(
-                "type"
-            )
+            message_type =
+                data.get("type")
 
 
             # ================================================
             # REQUEST STATE
             # ================================================
 
-            if (
-                message_type ==
-                "request_state"
+            if message_type in (
+                "request_state",
+                "sync",
             ):
 
-                await send_json(
+                await safe_send(
                     websocket,
-                    get_full_state(room),
+                    full_state(room),
                 )
 
 
@@ -2353,17 +3235,18 @@ async def websocket_endpoint(
                 "set_video"
             ):
 
-                video_id = extract_youtube_id(
-                    data.get(
-                        "video",
-                        "",
+                video_id =
+                    extract_youtube_id(
+                        data.get(
+                            "video",
+                            "",
+                        )
                     )
-                )
 
 
                 if not video_id:
 
-                    await send_json(
+                    await safe_send(
                         websocket,
                         {
                             "type": "error",
@@ -2375,22 +3258,25 @@ async def websocket_endpoint(
                     continue
 
 
-                room.video_id = video_id
+                room.video_id =
+                    video_id
 
-                room.position = 0.0
+                room.position =
+                    0.0
 
-                room.playing = False
+                room.playing =
+                    False
 
-                room.updated_at = (
+                room.updated_at =
                     time.monotonic()
-                )
 
 
                 await broadcast(
                     room,
                     {
                         "type": "video",
-                        "video_id": video_id,
+                        "video_id":
+                            video_id,
                     },
                 )
 
@@ -2410,46 +3296,49 @@ async def websocket_endpoint(
 
                 try:
 
-                    position = float(
-                        data.get(
-                            "position",
-                            0,
+                    position =
+                        float(
+                            data.get(
+                                "position",
+                                0,
+                            )
                         )
-                    )
 
                 except (
                     TypeError,
                     ValueError,
                 ):
 
-                    position = (
+                    position =
                         room.current_position()
+
+
+                position =
+                    max(
+                        0.0,
+                        position,
                     )
 
 
-                position = max(
-                    0.0,
-                    position,
-                )
+                room.position =
+                    position
 
+                room.playing =
+                    True
 
-                room.position = position
-
-                room.playing = True
-
-                room.updated_at = (
+                room.updated_at =
                     time.monotonic()
-                )
 
 
                 await broadcast(
                     room,
                     {
                         "type": "play",
-                        "position": round(
-                            position,
-                            3,
-                        ),
+                        "position":
+                            round(
+                                position,
+                                3,
+                            ),
                     },
                     exclude=client_id,
                 )
@@ -2470,46 +3359,49 @@ async def websocket_endpoint(
 
                 try:
 
-                    position = float(
-                        data.get(
-                            "position",
-                            0,
+                    position =
+                        float(
+                            data.get(
+                                "position",
+                                0,
+                            )
                         )
-                    )
 
                 except (
                     TypeError,
                     ValueError,
                 ):
 
-                    position = (
+                    position =
                         room.current_position()
+
+
+                position =
+                    max(
+                        0.0,
+                        position,
                     )
 
 
-                position = max(
-                    0.0,
-                    position,
-                )
+                room.position =
+                    position
 
+                room.playing =
+                    False
 
-                room.position = position
-
-                room.playing = False
-
-                room.updated_at = (
+                room.updated_at =
                     time.monotonic()
-                )
 
 
                 await broadcast(
                     room,
                     {
                         "type": "pause",
-                        "position": round(
-                            position,
-                            3,
-                        ),
+                        "position":
+                            round(
+                                position,
+                                3,
+                            ),
                     },
                     exclude=client_id,
                 )
@@ -2530,12 +3422,13 @@ async def websocket_endpoint(
 
                 try:
 
-                    position = float(
-                        data.get(
-                            "position",
-                            0,
+                    position =
+                        float(
+                            data.get(
+                                "position",
+                                0,
+                            )
                         )
-                    )
 
                 except (
                     TypeError,
@@ -2545,27 +3438,29 @@ async def websocket_endpoint(
                     continue
 
 
-                position = max(
-                    0.0,
-                    position,
-                )
+                position =
+                    max(
+                        0.0,
+                        position,
+                    )
 
 
-                room.position = position
+                room.position =
+                    position
 
-                room.updated_at = (
+                room.updated_at =
                     time.monotonic()
-                )
 
 
                 await broadcast(
                     room,
                     {
                         "type": "seek",
-                        "position": round(
-                            position,
-                            3,
-                        ),
+                        "position":
+                            round(
+                                position,
+                                3,
+                            ),
                     },
                     exclude=client_id,
                 )
@@ -2580,26 +3475,35 @@ async def websocket_endpoint(
                 "chat"
             ):
 
-                text = str(
-                    data.get(
-                        "text",
-                        "",
-                    )
-                ).strip()
+                text =
+                    str(
+                        data.get(
+                            "text",
+                            "",
+                        )
+                    ).strip()
 
 
                 if not text:
                     continue
 
 
-                text = text[:500]
+                text =
+                    text[:500]
 
 
                 message = {
-                    "id": secrets.token_hex(8),
-                    "nickname": nickname,
-                    "text": text,
-                    "time": int(time.time()),
+                    "id":
+                        secrets.token_hex(8),
+
+                    "nickname":
+                        nickname,
+
+                    "text":
+                        text,
+
+                    "time":
+                        int(time.time()),
                 }
 
 
@@ -2610,16 +3514,16 @@ async def websocket_endpoint(
 
                 if len(room.chat) > 100:
 
-                    room.chat = (
+                    room.chat =
                         room.chat[-100:]
-                    )
 
 
                 await broadcast(
                     room,
                     {
                         "type": "chat",
-                        "message": message,
+                        "message":
+                            message,
                     },
                 )
 
@@ -2660,12 +3564,14 @@ async def websocket_endpoint(
 
             async with rooms_lock:
 
-                current_room = rooms.get(
-                    room_id
-                )
+                current =
+                    rooms.get(
+                        room_id
+                    )
+
 
                 if (
-                    current_room is room
+                    current is room
                     and not room.clients
                 ):
 
@@ -2676,13 +3582,14 @@ async def websocket_endpoint(
 
 
 # ============================================================
-# HEALTH CHECK
+# HEALTH
 # ============================================================
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+
     return {
         "status": "ok",
-        "rooms": len(rooms),
         "service": "watch-together",
+        "rooms": len(rooms),
     }

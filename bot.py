@@ -1,18 +1,5 @@
 # -*- coding: utf-8 -*-
 
-"""
-WATCH TOGETHER
-Python 3.12.11
-FastAPI + WebSocket
-One-file application
-
-Render Start Command:
-
-uvicorn r:app --host 0.0.0.0 --port $PORT
-"""
-
-from __future__ import annotations
-
 import asyncio
 import re
 import secrets
@@ -44,7 +31,7 @@ app.add_middleware(
 
 
 # ============================================================
-# ROOM DATA
+# DATA
 # ============================================================
 
 @dataclass
@@ -57,33 +44,14 @@ class Client:
 @dataclass
 class Room:
     room_id: str
-
     video_id: str = ""
-
     playing: bool = False
     position: float = 0.0
+    updated_at: float = field(default_factory=time.monotonic)
+    clients: dict[str, Client] = field(default_factory=dict)
+    chat: list[dict[str, Any]] = field(default_factory=list)
 
-    # monotonic timestamp corresponding to position
-    updated_at: float = field(
-        default_factory=time.monotonic
-    )
-
-    clients: dict[str, Client] = field(
-        default_factory=dict
-    )
-
-    chat: list[dict[str, Any]] = field(
-        default_factory=list
-    )
-
-    def get_position(self) -> float:
-        """
-        Calculate current video position.
-
-        If the room is playing, position advances
-        with time.
-        """
-
+    def current_position(self) -> float:
         if not self.playing:
             return max(0.0, self.position)
 
@@ -104,9 +72,7 @@ rooms_lock = asyncio.Lock()
 # HELPERS
 # ============================================================
 
-ROOM_ALPHABET = (
-    "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-)
+ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
 def generate_room_id(length: int = 6) -> str:
@@ -121,37 +87,31 @@ def generate_client_id() -> str:
 
 
 def clean_nickname(value: Any) -> str:
-    value = str(value or "").strip()
+    nickname = str(value or "").strip()
 
-    value = re.sub(
+    nickname = re.sub(
         r"\s+",
         " ",
-        value,
+        nickname,
     )
 
-    if not value:
-        value = "Guest"
+    if not nickname:
+        nickname = "Guest"
 
-    return value[:24]
+    return nickname[:24]
 
 
 def extract_youtube_id(value: Any) -> str | None:
     """
-    Extract YouTube video ID.
-
-    Supported:
+    Accepts:
 
     https://www.youtube.com/watch?v=XXXXXXXXXXX
-
     https://youtu.be/XXXXXXXXXXX
-
     https://www.youtube.com/embed/XXXXXXXXXXX
-
     https://www.youtube.com/shorts/XXXXXXXXXXX
-
     https://www.youtube.com/live/XXXXXXXXXXX
 
-    Direct 11-character YouTube ID.
+    Also accepts a direct 11-character YouTube ID.
     """
 
     value = str(value or "").strip()
@@ -159,7 +119,6 @@ def extract_youtube_id(value: Any) -> str | None:
     if not value:
         return None
 
-    # Direct ID
     if re.fullmatch(
         r"[A-Za-z0-9_-]{11}",
         value,
@@ -178,7 +137,7 @@ def extract_youtube_id(value: Any) -> str | None:
         match = re.search(
             pattern,
             value,
-            flags=re.IGNORECASE,
+            re.IGNORECASE,
         )
 
         if match:
@@ -187,7 +146,7 @@ def extract_youtube_id(value: Any) -> str | None:
     return None
 
 
-def participants(room: Room) -> list[dict[str, str]]:
+def get_participants(room: Room) -> list[dict[str, str]]:
     return [
         {
             "id": client.client_id,
@@ -197,17 +156,17 @@ def participants(room: Room) -> list[dict[str, str]]:
     ]
 
 
-def make_full_state(room: Room) -> dict[str, Any]:
+def get_full_state(room: Room) -> dict[str, Any]:
     return {
         "type": "full_state",
         "room": room.room_id,
         "video_id": room.video_id,
         "playing": room.playing,
         "position": round(
-            room.get_position(),
+            room.current_position(),
             3,
         ),
-        "participants": participants(room),
+        "participants": get_participants(room),
         "chat": room.chat[-100:],
     }
 
@@ -216,11 +175,9 @@ async def send_json(
     websocket: WebSocket,
     data: dict[str, Any],
 ) -> bool:
-
     try:
         await websocket.send_json(data)
         return True
-
     except Exception:
         return False
 
@@ -230,13 +187,9 @@ async def broadcast(
     data: dict[str, Any],
     exclude: str | None = None,
 ) -> None:
+    dead_clients: list[str] = []
 
-    dead: list[str] = []
-
-    for client_id, client in list(
-        room.clients.items()
-    ):
-
+    for client_id, client in list(room.clients.items()):
         if client_id == exclude:
             continue
 
@@ -246,24 +199,21 @@ async def broadcast(
         )
 
         if not success:
-            dead.append(client_id)
+            dead_clients.append(client_id)
 
-    for client_id in dead:
+    for client_id in dead_clients:
         room.clients.pop(
             client_id,
             None,
         )
 
 
-async def broadcast_participants(
-    room: Room,
-) -> None:
-
+async def broadcast_participants(room: Room) -> None:
     await broadcast(
         room,
         {
             "type": "participants",
-            "participants": participants(room),
+            "participants": get_participants(room),
         },
     )
 
@@ -282,7 +232,7 @@ HTML = r"""
 
 <meta
     name="viewport"
-    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    content="width=device-width, initial-scale=1.0"
 >
 
 <title>Watch Together</title>
@@ -293,32 +243,20 @@ HTML = r"""
     box-sizing: border-box;
 }
 
-:root {
-    --bg: #08080a;
-    --panel: #111114;
-    --panel2: #18181c;
-    --border: rgba(255,255,255,.08);
-    --text: #f5f5f5;
-    --muted: #9b9ba3;
-}
-
 html,
 body {
     width: 100%;
     height: 100%;
     margin: 0;
+}
 
-    background: var(--bg);
-    color: var(--text);
-
+body {
+    background: #080808;
+    color: #ffffff;
     font-family:
         Inter,
-        system-ui,
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
+        Arial,
         sans-serif;
-
     overflow: hidden;
 }
 
@@ -340,25 +278,20 @@ button {
 }
 
 
-/* ============================================================
-   HEADER
-   ============================================================ */
+/* HEADER */
 
 .header {
-    height: 62px;
-    min-height: 62px;
+    height: 60px;
+    min-height: 60px;
 
     display: flex;
     align-items: center;
 
-    padding: 0 16px;
+    padding: 0 14px;
 
-    background: rgba(8,8,10,.96);
+    background: #101010;
 
-    border-bottom:
-        1px solid var(--border);
-
-    z-index: 20;
+    border-bottom: 1px solid #252525;
 }
 
 .logo {
@@ -367,7 +300,7 @@ button {
 }
 
 .logo span {
-    color: var(--muted);
+    color: #777777;
     font-weight: 500;
 }
 
@@ -379,36 +312,32 @@ button {
     gap: 8px;
 }
 
-.room-label {
-    color: var(--muted);
+.room {
+    color: #888888;
     font-size: 12px;
 }
 
-.room-label strong {
-    color: var(--text);
+.room strong {
+    color: #ffffff;
 }
 
 .icon-button {
     width: 40px;
     height: 40px;
 
-    border-radius: 10px;
+    border: 1px solid #292929;
+    border-radius: 9px;
 
-    border:
-        1px solid var(--border);
-
-    background: var(--panel2);
-    color: var(--text);
+    background: #191919;
+    color: #ffffff;
 }
 
 .icon-button:hover {
-    background: #222228;
+    background: #242424;
 }
 
 
-/* ============================================================
-   MAIN
-   ============================================================ */
+/* MAIN */
 
 .main {
     flex: 1;
@@ -428,16 +357,14 @@ button {
 }
 
 
-/* ============================================================
-   PLAYER
-   ============================================================ */
+/* PLAYER */
 
 .player-container {
     width: 100%;
 
     aspect-ratio: 16 / 9;
 
-    background: #000;
+    background: #000000;
 
     position: relative;
 }
@@ -447,10 +374,12 @@ button {
     height: 100%;
 }
 
-.player-placeholder {
+.placeholder {
     position: absolute;
 
     inset: 0;
+
+    z-index: 2;
 
     display: flex;
     align-items: center;
@@ -458,40 +387,29 @@ button {
 
     text-align: center;
 
-    color: var(--muted);
-
-    background:
-        radial-gradient(
-            circle at center,
-            #17171c,
-            #050507 70%
-        );
+    background: #0b0b0b;
+    color: #777777;
 
     pointer-events: none;
-
-    z-index: 2;
 }
 
-.player-placeholder.hidden {
+.placeholder.hidden {
     display: none;
 }
 
 
-/* ============================================================
-   VIDEO BAR
-   ============================================================ */
+/* VIDEO INPUT */
 
 .video-bar {
     display: flex;
 
     gap: 8px;
 
-    padding: 12px;
+    padding: 10px;
 
-    background: var(--panel);
+    background: #111111;
 
-    border-bottom:
-        1px solid var(--border);
+    border-bottom: 1px solid #252525;
 }
 
 .video-input {
@@ -500,23 +418,19 @@ button {
 
     height: 42px;
 
-    padding: 0 13px;
+    padding: 0 12px;
 
-    color: var(--text);
+    border: 1px solid #292929;
+    border-radius: 9px;
 
-    background: #0c0c0f;
-
-    border:
-        1px solid var(--border);
-
-    border-radius: 10px;
+    background: #090909;
+    color: #ffffff;
 
     outline: none;
 }
 
 .video-input:focus {
-    border-color:
-        rgba(255,255,255,.22);
+    border-color: #444444;
 }
 
 .load-button {
@@ -525,44 +439,34 @@ button {
     padding: 0 18px;
 
     border: 0;
+    border-radius: 9px;
 
-    border-radius: 10px;
-
-    background: #fff;
-
-    color: #000;
+    background: #ffffff;
+    color: #000000;
 
     font-weight: 700;
 }
 
-.load-button:hover {
-    opacity: .9;
-}
 
+/* CHAT */
 
-/* ============================================================
-   CHAT
-   ============================================================ */
-
-.chat-panel {
-    width: 350px;
-    min-width: 350px;
+.chat {
+    width: 340px;
+    min-width: 340px;
 
     display: flex;
     flex-direction: column;
 
-    background: var(--panel);
+    background: #111111;
 
-    border-left:
-        1px solid var(--border);
+    border-left: 1px solid #252525;
 
     transition:
-        width .25s ease,
-        min-width .25s ease,
-        transform .25s ease;
+        width 0.25s ease,
+        min-width 0.25s ease;
 }
 
-.chat-panel.closed {
+.chat.closed {
     width: 0;
     min-width: 0;
 
@@ -570,16 +474,15 @@ button {
 }
 
 .chat-header {
-    height: 56px;
-    min-height: 56px;
+    height: 55px;
+    min-height: 55px;
 
     display: flex;
     align-items: center;
 
-    padding: 0 10px 0 15px;
+    padding: 0 10px 0 14px;
 
-    border-bottom:
-        1px solid var(--border);
+    border-bottom: 1px solid #252525;
 }
 
 .chat-title {
@@ -587,7 +490,10 @@ button {
 }
 
 .chat-online {
-    color: var(--muted);
+    margin-top: 2px;
+
+    color: #777777;
+
     font-size: 11px;
 }
 
@@ -595,30 +501,29 @@ button {
     margin-left: auto;
 }
 
-.chat-messages {
+.messages {
     flex: 1;
     min-height: 0;
 
     overflow-y: auto;
 
-    padding: 14px;
+    padding: 13px;
 }
 
-.chat-message {
+.message {
     margin-bottom: 13px;
 }
 
-.chat-author {
+.message-author {
     margin-bottom: 3px;
 
-    color: var(--muted);
+    color: #888888;
 
     font-size: 12px;
 }
 
-.chat-text {
+.message-text {
     font-size: 14px;
-
     line-height: 1.4;
 
     word-break: break-word;
@@ -627,12 +532,11 @@ button {
 .chat-form {
     display: flex;
 
-    gap: 8px;
+    gap: 7px;
 
-    padding: 12px;
+    padding: 10px;
 
-    border-top:
-        1px solid var(--border);
+    border-top: 1px solid #252525;
 }
 
 .chat-input {
@@ -641,65 +545,58 @@ button {
 
     height: 40px;
 
-    padding: 0 12px;
+    padding: 0 11px;
 
-    border:
-        1px solid var(--border);
+    border: 1px solid #292929;
+    border-radius: 8px;
 
-    border-radius: 9px;
-
-    background: #0c0c0f;
-    color: var(--text);
+    background: #090909;
+    color: #ffffff;
 
     outline: none;
 }
 
-.send-button {
+.send {
     width: 42px;
 
     border: 0;
+    border-radius: 8px;
 
-    border-radius: 9px;
-
-    background: #fff;
-
-    color: #000;
+    background: #ffffff;
+    color: #000000;
 
     font-weight: 800;
 }
 
 
-/* ============================================================
-   FOOTER
-   ============================================================ */
+/* FOOTER */
 
 .footer {
-    height: 50px;
-    min-height: 50px;
+    height: 48px;
+    min-height: 48px;
 
     display: flex;
     align-items: center;
 
-    padding: 0 14px;
+    padding: 0 13px;
 
-    background: var(--panel);
+    background: #101010;
 
-    border-top:
-        1px solid var(--border);
+    border-top: 1px solid #252525;
 }
 
-.connection {
+.status {
     display: flex;
     align-items: center;
 
     gap: 7px;
 
-    color: var(--muted);
+    color: #888888;
 
     font-size: 12px;
 }
 
-.connection-dot {
+.status-dot {
     width: 7px;
     height: 7px;
 
@@ -708,22 +605,20 @@ button {
     background: #22c55e;
 }
 
-.connection-dot.offline {
+.status-dot.offline {
     background: #ef4444;
 }
 
 .users {
     margin-left: auto;
 
-    color: var(--muted);
+    color: #888888;
 
     font-size: 12px;
 }
 
 
-/* ============================================================
-   MODAL
-   ============================================================ */
+/* MODAL */
 
 .modal {
     position: fixed;
@@ -738,10 +633,7 @@ button {
 
     padding: 20px;
 
-    background:
-        rgba(0,0,0,.78);
-
-    backdrop-filter: blur(8px);
+    background: rgba(0, 0, 0, 0.82);
 }
 
 .modal.hidden {
@@ -749,99 +641,88 @@ button {
 }
 
 .modal-card {
-    width: min(420px, 100%);
+    width: min(400px, 100%);
 
-    padding: 24px;
+    padding: 23px;
 
-    border:
-        1px solid var(--border);
+    border: 1px solid #292929;
+    border-radius: 14px;
 
-    border-radius: 16px;
-
-    background: #121216;
+    background: #121212;
 }
 
 .modal-title {
     margin: 0 0 7px;
-
-    font-size: 22px;
 }
 
-.modal-text {
-    margin: 0 0 20px;
+.modal-description {
+    margin: 0 0 18px;
 
-    color: var(--muted);
+    color: #777777;
 
     font-size: 14px;
 }
 
-.nickname-input {
+.nickname {
     width: 100%;
 
     height: 44px;
 
-    padding: 0 13px;
+    padding: 0 12px;
 
-    border:
-        1px solid var(--border);
+    border: 1px solid #292929;
+    border-radius: 9px;
 
-    border-radius: 10px;
-
-    background: #0b0b0e;
-
-    color: var(--text);
+    background: #090909;
+    color: #ffffff;
 
     outline: none;
 }
 
-.join-button {
+.join {
     width: 100%;
 
     height: 44px;
 
-    margin-top: 10px;
+    margin-top: 9px;
 
     border: 0;
+    border-radius: 9px;
 
-    border-radius: 10px;
-
-    background: #fff;
-
-    color: #000;
+    background: #ffffff;
+    color: #000000;
 
     font-weight: 700;
 }
 
 
-/* ============================================================
-   TOAST
-   ============================================================ */
+/* TOAST */
 
 .toast {
     position: fixed;
 
     left: 50%;
-    bottom: 70px;
+    bottom: 65px;
 
-    transform:
-        translate(-50%, 15px);
+    z-index: 200;
 
-    opacity: 0;
+    padding: 9px 13px;
 
-    pointer-events: none;
+    border-radius: 8px;
 
-    z-index: 300;
-
-    padding: 10px 14px;
-
-    border-radius: 9px;
-
-    background: #fff;
-    color: #000;
+    background: #ffffff;
+    color: #000000;
 
     font-size: 13px;
 
-    transition: .2s ease;
+    opacity: 0;
+
+    transform:
+        translate(-50%, 10px);
+
+    pointer-events: none;
+
+    transition: 0.2s ease;
 }
 
 .toast.show {
@@ -852,22 +733,38 @@ button {
 }
 
 
-/* ============================================================
-   MOBILE
-   ============================================================ */
+/* MOBILE */
 
 @media (max-width: 800px) {
 
-    .header {
-        padding: 0 10px;
-    }
-
-    .room-label {
+    .room {
         display: none;
     }
 
-    .player-container {
-        aspect-ratio: 16 / 9;
+    .chat {
+        position: absolute;
+
+        right: 0;
+        top: 0;
+        bottom: 0;
+
+        width: min(350px, 92vw);
+        min-width: min(350px, 92vw);
+
+        z-index: 50;
+
+        box-shadow:
+            -20px 0 50px rgba(0,0,0,.5);
+
+        transition:
+            transform .25s ease;
+    }
+
+    .chat.closed {
+        width: min(350px, 92vw);
+        min-width: min(350px, 92vw);
+
+        transform: translateX(105%);
     }
 
     .video-bar {
@@ -875,37 +772,12 @@ button {
     }
 
     .video-input {
-        flex-basis: 100%;
         width: 100%;
+        flex-basis: 100%;
     }
 
     .load-button {
         flex: 1;
-    }
-
-    .chat-panel {
-        position: absolute;
-
-        right: 0;
-        top: 0;
-        bottom: 0;
-
-        width: min(360px, 92vw);
-        min-width: min(360px, 92vw);
-
-        z-index: 50;
-
-        box-shadow:
-            -20px 0 60px
-            rgba(0,0,0,.5);
-    }
-
-    .chat-panel.closed {
-        width: min(360px, 92vw);
-        min-width: min(360px, 92vw);
-
-        transform:
-            translateX(105%);
     }
 }
 
@@ -913,14 +785,9 @@ button {
 
 </head>
 
-
 <body>
 
-
 <div id="app">
-
-
-    <!-- HEADER -->
 
     <header class="header">
 
@@ -930,15 +797,15 @@ button {
 
         <div class="header-right">
 
-            <div class="room-label">
-                ROOM
+            <div class="room">
+                ROOM:
                 <strong id="roomCode">------</strong>
             </div>
 
             <button
                 id="copyButton"
                 class="icon-button"
-                title="Copy room link"
+                type="button"
             >
                 🔗
             </button>
@@ -946,7 +813,7 @@ button {
             <button
                 id="chatButton"
                 class="icon-button"
-                title="Chat"
+                type="button"
             >
                 💬
             </button>
@@ -956,32 +823,23 @@ button {
     </header>
 
 
-    <!-- MAIN -->
-
     <main class="main">
-
-
-        <!-- VIDEO -->
 
         <section class="video-section">
 
             <div class="player-container">
 
-                <div
-                    id="player"
-                ></div>
+                <div id="player"></div>
 
                 <div
                     id="placeholder"
-                    class="player-placeholder"
+                    class="placeholder"
                 >
                     <div>
                         <strong>
                             No video loaded
                         </strong>
-
                         <br>
-
                         Paste a YouTube link below
                     </div>
                 </div>
@@ -1002,6 +860,7 @@ button {
                 <button
                     id="loadButton"
                     class="load-button"
+                    type="button"
                 >
                     Load video
                 </button>
@@ -1011,11 +870,9 @@ button {
         </section>
 
 
-        <!-- CHAT -->
-
         <aside
-            id="chatPanel"
-            class="chat-panel"
+            id="chat"
+            class="chat"
         >
 
             <div class="chat-header">
@@ -1027,9 +884,7 @@ button {
                     </div>
 
                     <div class="chat-online">
-                        <span id="onlineCount">
-                            0
-                        </span>
+                        <span id="onlineCount">0</span>
                         online
                     </div>
 
@@ -1038,6 +893,7 @@ button {
                 <button
                     id="closeChat"
                     class="icon-button chat-close"
+                    type="button"
                 >
                     →
                 </button>
@@ -1046,8 +902,8 @@ button {
 
 
             <div
-                id="chatMessages"
-                class="chat-messages"
+                id="messages"
+                class="messages"
             ></div>
 
 
@@ -1065,7 +921,7 @@ button {
                 >
 
                 <button
-                    class="send-button"
+                    class="send"
                     type="submit"
                 >
                     ↑
@@ -1075,42 +931,33 @@ button {
 
         </aside>
 
-
     </main>
 
 
-    <!-- FOOTER -->
-
     <footer class="footer">
 
-        <div class="connection">
+        <div class="status">
 
             <span
-                id="connectionDot"
-                class="connection-dot offline"
+                id="statusDot"
+                class="status-dot offline"
             ></span>
 
-            <span id="connectionText">
+            <span id="statusText">
                 Connecting...
             </span>
 
         </div>
 
-
         <div class="users">
             👥
-            <span id="usersCount">
-                0
-            </span>
+            <span id="usersCount">0</span>
         </div>
 
     </footer>
 
-
 </div>
 
-
-<!-- NICKNAME MODAL -->
 
 <div
     id="nicknameModal"
@@ -1123,23 +970,24 @@ button {
             Join room
         </h2>
 
-        <p class="modal-text">
-            Choose a nickname.
+        <p class="modal-description">
+            Choose your nickname.
         </p>
 
         <input
             id="nicknameInput"
-            class="nickname-input"
+            class="nickname"
             maxlength="24"
-            placeholder="Your nickname"
+            placeholder="Nickname"
             autocomplete="off"
         >
 
         <button
             id="joinButton"
-            class="join-button"
+            class="join"
+            type="button"
         >
-            Join room
+            Join
         </button>
 
     </div>
@@ -1153,11 +1001,9 @@ button {
 ></div>
 
 
-<!-- ============================================================
-     YOUTUBE API
-     ============================================================ -->
-
-<script src="https://www.youtube.com/iframe_api"></script>
+<script
+    src="https://www.youtube.com/iframe_api"
+></script>
 
 
 <script>
@@ -1166,18 +1012,16 @@ button {
 
 
 /* ============================================================
-   VARIABLES
+   STATE
    ============================================================ */
 
 const roomId =
-    location.pathname.startsWith("/r/")
-        ? location.pathname
-            .split("/")[2]
-            .toUpperCase()
-        : null;
+    location.pathname
+        .split("/")
+        .filter(Boolean)[1]
+        ?.toUpperCase() || null;
 
-
-let websocket = null;
+let socket = null;
 
 let player = null;
 
@@ -1189,33 +1033,9 @@ let currentVideoId = "";
 
 let reconnectTimer = null;
 
-let intentionallyClosed = false;
+let suppressUntil = 0;
 
-
-/*
-    Prevent local YouTube events generated by
-    remote commands from being sent back.
-*/
-
-let suppressEventsUntil = 0;
-
-
-/*
-    Last position known locally.
-
-    Used to detect manual seeking because
-    YouTube IFrame API doesn't expose a simple
-    "seek" event.
-*/
-
-let lastKnownPosition = 0;
-
-let lastKnownPlayerState = -1;
-
-
-/*
-    Prevent the sync loop from sending repeatedly.
-*/
+let lastPosition = 0;
 
 let lastSentSeek = -1;
 
@@ -1224,11 +1044,11 @@ let lastSentSeek = -1;
    DOM
    ============================================================ */
 
-const chatPanel =
-    document.getElementById("chatPanel");
+const chat =
+    document.getElementById("chat");
 
-const chatMessages =
-    document.getElementById("chatMessages");
+const messages =
+    document.getElementById("messages");
 
 const chatInput =
     document.getElementById("chatInput");
@@ -1239,7 +1059,7 @@ const videoInput =
 const placeholder =
     document.getElementById("placeholder");
 
-const nicknameModal =
+const modal =
     document.getElementById("nicknameModal");
 
 const nicknameInput =
@@ -1251,7 +1071,8 @@ const toast =
 
 document.getElementById(
     "roomCode"
-).textContent = roomId || "------";
+).textContent =
+    roomId || "------";
 
 
 /* ============================================================
@@ -1264,26 +1085,29 @@ function showToast(text) {
 
     toast.classList.add("show");
 
-    setTimeout(() => {
-        toast.classList.remove("show");
-    }, 2200);
+    setTimeout(
+        function () {
+            toast.classList.remove("show");
+        },
+        2200
+    );
 }
 
 
 /* ============================================================
-   CONNECTION UI
+   CONNECTION
    ============================================================ */
 
 function setConnection(connected) {
 
     const dot =
         document.getElementById(
-            "connectionDot"
+            "statusDot"
         );
 
     const text =
         document.getElementById(
-            "connectionText"
+            "statusText"
         );
 
     dot.classList.toggle(
@@ -1299,21 +1123,22 @@ function setConnection(connected) {
 
 
 /* ============================================================
-   WEBSOCKET SEND
+   SEND
    ============================================================ */
 
 function send(data) {
 
     if (
-        !websocket ||
-        websocket.readyState !== WebSocket.OPEN
+        !socket ||
+        socket.readyState !==
+            WebSocket.OPEN
     ) {
         return false;
     }
 
     try {
 
-        websocket.send(
+        socket.send(
             JSON.stringify(data)
         );
 
@@ -1323,54 +1148,6 @@ function send(data) {
 
         return false;
     }
-}
-
-
-/* ============================================================
-   CHAT
-   ============================================================ */
-
-function clearChat() {
-    chatMessages.innerHTML = "";
-}
-
-
-function addChatMessage(message) {
-
-    const wrapper =
-        document.createElement("div");
-
-    wrapper.className =
-        "chat-message";
-
-
-    const author =
-        document.createElement("div");
-
-    author.className =
-        "chat-author";
-
-    author.textContent =
-        message.nickname || "Guest";
-
-
-    const text =
-        document.createElement("div");
-
-    text.className =
-        "chat-text";
-
-    text.textContent =
-        message.text || "";
-
-
-    wrapper.appendChild(author);
-    wrapper.appendChild(text);
-
-    chatMessages.appendChild(wrapper);
-
-    chatMessages.scrollTop =
-        chatMessages.scrollHeight;
 }
 
 
@@ -1396,18 +1173,74 @@ function updateParticipants(list) {
 
 
 /* ============================================================
-   YOUTUBE API
+   CHAT
    ============================================================ */
 
-window.onYouTubeIframeAPIReady = function () {
+function clearMessages() {
+    messages.innerHTML = "";
+}
 
-    createPlayer();
-};
+
+function addMessage(message) {
+
+    const wrapper =
+        document.createElement("div");
+
+    wrapper.className =
+        "message";
+
+
+    const author =
+        document.createElement("div");
+
+    author.className =
+        "message-author";
+
+    author.textContent =
+        message.nickname || "Guest";
+
+
+    const text =
+        document.createElement("div");
+
+    text.className =
+        "message-text";
+
+    text.textContent =
+        message.text || "";
+
+
+    wrapper.appendChild(author);
+
+    wrapper.appendChild(text);
+
+    messages.appendChild(wrapper);
+
+    messages.scrollTop =
+        messages.scrollHeight;
+}
+
+
+/* ============================================================
+   YOUTUBE
+   ============================================================ */
+
+window.onYouTubeIframeAPIReady =
+    function () {
+        createPlayer();
+    };
 
 
 function createPlayer() {
 
     if (player) {
+        return;
+    }
+
+    if (
+        !window.YT ||
+        !window.YT.Player
+    ) {
         return;
     }
 
@@ -1422,13 +1255,11 @@ function createPlayer() {
                     autoplay: 0,
                     controls: 1,
                     rel: 0,
-                    modestbranding: 1,
                     playsinline: 1,
-                    origin: location.origin
+                    modestbranding: 1
                 },
 
                 events: {
-
                     onReady:
                         onPlayerReady,
 
@@ -1444,13 +1275,6 @@ function onPlayerReady() {
 
     playerReady = true;
 
-    /*
-        Ask server for current room state.
-
-        This is important if the user joined
-        an already-running room.
-    */
-
     send({
         type: "request_state"
     });
@@ -1458,7 +1282,7 @@ function onPlayerReady() {
 
 
 /* ============================================================
-   PLAYER STATE CHANGE
+   YOUTUBE STATE
    ============================================================ */
 
 function onPlayerStateChange(event) {
@@ -1467,45 +1291,23 @@ function onPlayerStateChange(event) {
         return;
     }
 
-
-    const state =
-        event.data;
-
-
-    /*
-        Ignore events generated by remote commands.
-    */
-
     if (
         Date.now() <
-        suppressEventsUntil
+        suppressUntil
     ) {
-        lastKnownPlayerState = state;
-
-        if (player) {
-            lastKnownPosition =
-                player.getCurrentTime() || 0;
-        }
-
         return;
     }
-
 
     if (!player) {
         return;
     }
 
-
     const position =
         player.getCurrentTime() || 0;
 
 
-    /*
-        PLAYING
-    */
-
     if (
-        state ===
+        event.data ===
         YT.PlayerState.PLAYING
     ) {
 
@@ -1513,15 +1315,9 @@ function onPlayerStateChange(event) {
             type: "play",
             position: position
         });
-    }
 
-
-    /*
-        PAUSED
-    */
-
-    else if (
-        state ===
+    } else if (
+        event.data ===
         YT.PlayerState.PAUSED
     ) {
 
@@ -1532,16 +1328,13 @@ function onPlayerStateChange(event) {
     }
 
 
-    lastKnownPlayerState =
-        state;
-
-    lastKnownPosition =
+    lastPosition =
         position;
 }
 
 
 /* ============================================================
-   APPLY SERVER STATE
+   APPLY FULL STATE
    ============================================================ */
 
 function applyFullState(data) {
@@ -1551,24 +1344,15 @@ function applyFullState(data) {
     );
 
 
-    /*
-        Chat
-    */
-
-    clearChat();
+    clearMessages();
 
     for (
         const message
         of (data.chat || [])
     ) {
-
-        addChatMessage(message);
+        addMessage(message);
     }
 
-
-    /*
-        No video
-    */
 
     if (!data.video_id) {
 
@@ -1587,7 +1371,10 @@ function applyFullState(data) {
     );
 
 
-    if (!playerReady || !player) {
+    if (
+        !playerReady ||
+        !player
+    ) {
         return;
     }
 
@@ -1596,21 +1383,14 @@ function applyFullState(data) {
         data.video_id;
 
     const position =
-        Number(data.position || 0);
+        Number(
+            data.position || 0
+        );
 
 
-    /*
-        Suppress events caused by
-        this remote state.
-    */
+    suppressUntil =
+        Date.now() + 1500;
 
-    suppressEventsUntil =
-        Date.now() + 1200;
-
-
-    /*
-        Different video.
-    */
 
     if (
         currentVideoId !==
@@ -1627,79 +1407,53 @@ function applyFullState(data) {
         });
 
 
-        /*
-            loadVideoById may autoplay
-            depending on browser/player state.
+        setTimeout(
+            function () {
 
-            Force the correct state after
-            a short delay.
-        */
+                if (!player) {
+                    return;
+                }
 
-        setTimeout(() => {
+                suppressUntil =
+                    Date.now() + 1000;
 
-            if (!player) {
-                return;
-            }
-
-            if (data.playing) {
-
-                player.playVideo();
-
-            } else {
-
-                player.pauseVideo();
-            }
-
-        }, 500);
-
-
-        lastKnownPosition =
-            position;
-
-        return;
-    }
-
-
-    /*
-        Same video.
-    */
-
-    const localPosition =
-        player.getCurrentTime() || 0;
-
-
-    /*
-        Correct large drift.
-    */
-
-    if (
-        Math.abs(
-            localPosition - position
-        ) > 1.25
-    ) {
-
-        player.seekTo(
-            position,
-            true
+                if (data.playing) {
+                    player.playVideo();
+                } else {
+                    player.pauseVideo();
+                }
+            },
+            600
         );
-    }
-
-
-    /*
-        Correct play state.
-    */
-
-    if (data.playing) {
-
-        player.playVideo();
 
     } else {
 
-        player.pauseVideo();
+        const localPosition =
+            player.getCurrentTime() || 0;
+
+
+        if (
+            Math.abs(
+                localPosition - position
+            ) > 1.25
+        ) {
+
+            player.seekTo(
+                position,
+                true
+            );
+        }
+
+
+        if (data.playing) {
+            player.playVideo();
+        } else {
+            player.pauseVideo();
+        }
     }
 
 
-    lastKnownPosition =
+    lastPosition =
         position;
 }
 
@@ -1708,14 +1462,16 @@ function applyFullState(data) {
    REMOTE PLAY
    ============================================================ */
 
-function applyRemotePlay(position) {
+function remotePlay(position) {
 
-    if (!playerReady || !player) {
+    if (
+        !playerReady ||
+        !player
+    ) {
         return;
     }
 
-
-    suppressEventsUntil =
+    suppressUntil =
         Date.now() + 1000;
 
 
@@ -1724,8 +1480,9 @@ function applyRemotePlay(position) {
 
 
     if (
-        Math.abs(local - position)
-        > 1.25
+        Math.abs(
+            local - position
+        ) > 1.25
     ) {
 
         player.seekTo(
@@ -1737,8 +1494,7 @@ function applyRemotePlay(position) {
 
     player.playVideo();
 
-
-    lastKnownPosition =
+    lastPosition =
         position;
 }
 
@@ -1747,14 +1503,16 @@ function applyRemotePlay(position) {
    REMOTE PAUSE
    ============================================================ */
 
-function applyRemotePause(position) {
+function remotePause(position) {
 
-    if (!playerReady || !player) {
+    if (
+        !playerReady ||
+        !player
+    ) {
         return;
     }
 
-
-    suppressEventsUntil =
+    suppressUntil =
         Date.now() + 1000;
 
 
@@ -1763,8 +1521,9 @@ function applyRemotePause(position) {
 
 
     if (
-        Math.abs(local - position)
-        > 1.25
+        Math.abs(
+            local - position
+        ) > 1.25
     ) {
 
         player.seekTo(
@@ -1776,8 +1535,7 @@ function applyRemotePause(position) {
 
     player.pauseVideo();
 
-
-    lastKnownPosition =
+    lastPosition =
         position;
 }
 
@@ -1786,14 +1544,16 @@ function applyRemotePause(position) {
    REMOTE SEEK
    ============================================================ */
 
-function applyRemoteSeek(position) {
+function remoteSeek(position) {
 
-    if (!playerReady || !player) {
+    if (
+        !playerReady ||
+        !player
+    ) {
         return;
     }
 
-
-    suppressEventsUntil =
+    suppressUntil =
         Date.now() + 800;
 
 
@@ -1803,7 +1563,7 @@ function applyRemoteSeek(position) {
     );
 
 
-    lastKnownPosition =
+    lastPosition =
         position;
 }
 
@@ -1812,23 +1572,24 @@ function applyRemoteSeek(position) {
    REMOTE VIDEO
    ============================================================ */
 
-function applyRemoteVideo(videoId) {
+function remoteVideo(videoId) {
 
-    if (!playerReady || !player) {
+    if (
+        !playerReady ||
+        !player
+    ) {
         return;
     }
 
-
     currentVideoId =
         videoId;
-
 
     placeholder.classList.add(
         "hidden"
     );
 
 
-    suppressEventsUntil =
+    suppressUntil =
         Date.now() + 1500;
 
 
@@ -1838,28 +1599,12 @@ function applyRemoteVideo(videoId) {
     });
 
 
-    /*
-        New videos start paused.
-
-        Server will send the actual play state
-        separately if required.
-    */
-
-    setTimeout(() => {
-
-        if (player) {
-            player.pauseVideo();
-        }
-
-    }, 400);
-
-
-    lastKnownPosition = 0;
+    lastPosition = 0;
 }
 
 
 /* ============================================================
-   HANDLE WEBSOCKET MESSAGE
+   SOCKET MESSAGE
    ============================================================ */
 
 function handleMessage(data) {
@@ -1869,144 +1614,83 @@ function handleMessage(data) {
     }
 
 
-    /*
-        Full state
-    */
+    switch (data.type) {
 
-    if (
-        data.type ===
-        "full_state"
-    ) {
+        case "full_state":
 
-        applyFullState(data);
+            applyFullState(data);
 
-        return;
-    }
+            break;
 
 
-    /*
-        New video
-    */
+        case "video":
 
-    if (
-        data.type ===
-        "video"
-    ) {
+            remoteVideo(
+                data.video_id
+            );
 
-        applyRemoteVideo(
-            data.video_id
-        );
-
-        return;
-    }
+            break;
 
 
-    /*
-        Play
-    */
+        case "play":
 
-    if (
-        data.type ===
-        "play"
-    ) {
+            remotePlay(
+                Number(
+                    data.position || 0
+                )
+            );
 
-        applyRemotePlay(
-            Number(
-                data.position || 0
-            )
-        );
-
-        return;
-    }
+            break;
 
 
-    /*
-        Pause
-    */
+        case "pause":
 
-    if (
-        data.type ===
-        "pause"
-    ) {
+            remotePause(
+                Number(
+                    data.position || 0
+                )
+            );
 
-        applyRemotePause(
-            Number(
-                data.position || 0
-            )
-        );
-
-        return;
-    }
+            break;
 
 
-    /*
-        Seek
-    */
+        case "seek":
 
-    if (
-        data.type ===
-        "seek"
-    ) {
+            remoteSeek(
+                Number(
+                    data.position || 0
+                )
+            );
 
-        applyRemoteSeek(
-            Number(
-                data.position || 0
-            )
-        );
-
-        return;
-    }
+            break;
 
 
-    /*
-        Chat
-    */
+        case "chat":
 
-    if (
-        data.type ===
-        "chat"
-    ) {
+            addMessage(
+                data.message
+            );
 
-        addChatMessage(
-            data.message
-        );
-
-        return;
-    }
+            break;
 
 
-    /*
-        Participants
-    */
+        case "participants":
 
-    if (
-        data.type ===
-        "participants"
-    ) {
+            updateParticipants(
+                data.participants || []
+            );
 
-        updateParticipants(
-            data.participants || []
-        );
-
-        return;
-    }
+            break;
 
 
-    /*
-        Error
-    */
+        case "error":
 
-    if (
-        data.type ===
-        "error"
-    ) {
+            showToast(
+                data.message ||
+                "Server error"
+            );
 
-        showToast(
-            data.message ||
-            "Server error"
-        );
-
-        return;
+            break;
     }
 }
 
@@ -2026,19 +1710,11 @@ function connect() {
 
 
     if (
-        websocket &&
-        websocket.readyState ===
-        WebSocket.OPEN
+        socket &&
+        socket.readyState ===
+            WebSocket.OPEN
     ) {
         return;
-    }
-
-
-    if (websocket) {
-
-        try {
-            websocket.close();
-        } catch (_) {}
     }
 
 
@@ -2058,15 +1734,14 @@ function connect() {
         );
 
 
-    websocket =
+    socket =
         new WebSocket(url);
 
 
-    websocket.onopen =
+    socket.onopen =
         function () {
 
             setConnection(true);
-
 
             send({
                 type: "join",
@@ -2075,7 +1750,7 @@ function connect() {
         };
 
 
-    websocket.onmessage =
+    socket.onmessage =
         function (event) {
 
             try {
@@ -2090,32 +1765,23 @@ function connect() {
             } catch (error) {
 
                 console.error(
-                    "Invalid WebSocket message",
                     error
                 );
             }
         };
 
 
-    websocket.onerror =
+    socket.onerror =
         function () {
 
             setConnection(false);
         };
 
 
-    websocket.onclose =
+    socket.onclose =
         function () {
 
             setConnection(false);
-
-
-            if (
-                intentionallyClosed
-            ) {
-                return;
-            }
-
 
             clearTimeout(
                 reconnectTimer
@@ -2124,7 +1790,7 @@ function connect() {
 
             reconnectTimer =
                 setTimeout(
-                    () => {
+                    function () {
                         connect();
                     },
                     2000
@@ -2146,7 +1812,7 @@ function loadVideo() {
     if (!value) {
 
         showToast(
-            "Paste a YouTube link"
+            "Paste a YouTube URL"
         );
 
         return;
@@ -2154,9 +1820,9 @@ function loadVideo() {
 
 
     if (
-        !websocket ||
-        websocket.readyState !==
-        WebSocket.OPEN
+        !socket ||
+        socket.readyState !==
+            WebSocket.OPEN
     ) {
 
         showToast(
@@ -2166,11 +1832,6 @@ function loadVideo() {
         return;
     }
 
-
-    /*
-        The server extracts and validates
-        the actual YouTube ID.
-    */
 
     send({
         type: "set_video",
@@ -2192,7 +1853,8 @@ videoInput.addEventListener(
     function (event) {
 
         if (
-            event.key === "Enter"
+            event.key ===
+            "Enter"
         ) {
 
             event.preventDefault();
@@ -2239,7 +1901,7 @@ document.getElementById(
 
 
 /* ============================================================
-   CHAT TOGGLE
+   CHAT BUTTONS
    ============================================================ */
 
 document.getElementById(
@@ -2248,7 +1910,7 @@ document.getElementById(
     "click",
     function () {
 
-        chatPanel.classList.toggle(
+        chat.classList.toggle(
             "closed"
         );
     }
@@ -2261,7 +1923,7 @@ document.getElementById(
     "click",
     function () {
 
-        chatPanel.classList.add(
+        chat.classList.add(
             "closed"
         );
     }
@@ -2288,7 +1950,7 @@ document.getElementById(
                 "Room link copied"
             );
 
-        } catch (_) {
+        } catch (error) {
 
             showToast(
                 location.href
@@ -2299,7 +1961,7 @@ document.getElementById(
 
 
 /* ============================================================
-   POSITION / SEEK DETECTOR
+   SEEK DETECTION
    ============================================================ */
 
 setInterval(
@@ -2314,9 +1976,9 @@ setInterval(
 
 
         if (
-            !websocket ||
-            websocket.readyState !==
-            WebSocket.OPEN
+            !socket ||
+            socket.readyState !==
+                WebSocket.OPEN
         ) {
             return;
         }
@@ -2324,15 +1986,15 @@ setInterval(
 
         if (
             Date.now() <
-            suppressEventsUntil
+            suppressUntil
         ) {
             return;
         }
 
 
-        let position = 0;
+        let position;
 
-        let state = -1;
+        let state;
 
 
         try {
@@ -2343,65 +2005,27 @@ setInterval(
             state =
                 player.getPlayerState();
 
-        } catch (_) {
+        } catch (error) {
 
             return;
         }
 
 
-        /*
-            Detect manual seek.
-
-            Normal playback changes by approximately
-            the elapsed time.
-
-            A large jump indicates seek.
-        */
-
         const difference =
             Math.abs(
                 position -
-                lastKnownPosition
+                lastPosition
             );
 
 
         if (
-            state ===
-                YT.PlayerState.PLAYING &&
-            difference > 1.5
-        ) {
-
-            /*
-                Don't send the same seek repeatedly.
-            */
-
-            if (
-                Math.abs(
-                    position -
-                    lastSentSeek
-                ) > 1
-            ) {
-
-                send({
-                    type: "seek",
-                    position: position
-                });
-
-                lastSentSeek =
-                    position;
-            }
-        }
-
-
-        /*
-            When paused, a position jump is
-            also a seek.
-        */
-
-        else if (
-            state ===
-                YT.PlayerState.PAUSED &&
-            difference > 1.5
+            difference > 1.5 &&
+            (
+                state ===
+                    YT.PlayerState.PLAYING ||
+                state ===
+                    YT.PlayerState.PAUSED
+            )
         ) {
 
             if (
@@ -2422,11 +2046,8 @@ setInterval(
         }
 
 
-        lastKnownPosition =
+        lastPosition =
             position;
-
-        lastKnownPlayerState =
-            state;
 
     },
     500
@@ -2434,44 +2055,47 @@ setInterval(
 
 
 /* ============================================================
-   NICKNAME
+   JOIN
    ============================================================ */
+
+function joinRoom() {
+
+    let value =
+        nicknameInput.value.trim();
+
+
+    if (!value) {
+        value = "Guest";
+    }
+
+
+    nickname =
+        value.slice(
+            0,
+            24
+        );
+
+
+    localStorage.setItem(
+        "watch_together_nickname",
+        nickname
+    );
+
+
+    modal.classList.add(
+        "hidden"
+    );
+
+
+    connect();
+}
+
 
 document.getElementById(
     "joinButton"
 ).addEventListener(
     "click",
-    function () {
-
-        let value =
-            nicknameInput.value.trim();
-
-
-        if (!value) {
-            value = "Guest";
-        }
-
-
-        nickname =
-            value.slice(
-                0,
-                24
-            );
-
-
-        localStorage.setItem(
-            "watch_together_nickname",
-            nickname
-        );
-
-
-        nicknameModal.classList.add(
-            "hidden"
-        );
-
-
-        connect();
-    }
+    joinRoom
 );
 
 
@@ -2480,14 +2104,13 @@ nicknameInput.addEventListener(
     function (event) {
 
         if (
-            event.key === "Enter"
+            event.key ===
+            "Enter"
         ) {
 
             event.preventDefault();
 
-            document.getElementById(
-                "joinButton"
-            ).click();
+            joinRoom();
         }
     }
 );
@@ -2499,25 +2122,10 @@ nicknameInput.addEventListener(
 
 function start() {
 
-    /*
-        If someone somehow opens the root,
-        server should redirect to a room.
-
-        This branch is only a fallback.
-    */
-
     if (!roomId) {
 
-        const generated =
-            Math.random()
-                .toString(36)
-                .slice(2, 8)
-                .toUpperCase();
-
-
         location.href =
-            "/r/" +
-            generated;
+            "/";
 
         return;
     }
@@ -2535,16 +2143,10 @@ function start() {
     }
 
 
-    nicknameModal.classList.remove(
+    modal.classList.remove(
         "hidden"
     );
 
-
-    /*
-        If YouTube API has already loaded
-        before our callback was installed,
-        create the player manually.
-    */
 
     if (
         window.YT &&
@@ -2567,16 +2169,14 @@ start();
 
 
 # ============================================================
-# HTTP
+# HTTP ROUTES
 # ============================================================
 
 @app.get("/")
-async def root():
-
+async def root() -> RedirectResponse:
     room_id = generate_room_id()
 
     async with rooms_lock:
-
         rooms[room_id] = Room(
             room_id=room_id
         )
@@ -2591,18 +2191,14 @@ async def root():
     "/r/{room_id}",
     response_class=HTMLResponse,
 )
-async def room_page(
-    room_id: str,
-):
+async def room_page(room_id: str) -> HTMLResponse:
 
     room_id = room_id.upper()
-
 
     if not re.fullmatch(
         r"[A-Z0-9]{4,20}",
         room_id,
     ):
-
         return HTMLResponse(
             "<h1>Invalid room ID</h1>",
             status_code=400,
@@ -2612,15 +2208,12 @@ async def room_page(
     async with rooms_lock:
 
         if room_id not in rooms:
-
             rooms[room_id] = Room(
                 room_id=room_id
             )
 
 
-    return HTMLResponse(
-        HTML
-    )
+    return HTMLResponse(HTML)
 
 
 # ============================================================
@@ -2633,20 +2226,16 @@ async def room_page(
 async def websocket_endpoint(
     websocket: WebSocket,
     room_id: str,
-):
+) -> None:
 
     await websocket.accept()
-
 
     room_id = room_id.upper()
 
 
     async with rooms_lock:
 
-        room = rooms.get(
-            room_id
-        )
-
+        room = rooms.get(room_id)
 
         if room is None:
 
@@ -2657,21 +2246,20 @@ async def websocket_endpoint(
             rooms[room_id] = room
 
 
-    client_id =
-        generate_client_id()
-
+    client_id = generate_client_id()
 
     client: Client | None = None
 
 
     try:
 
-        # ====================================================
-        # FIRST MESSAGE MUST BE JOIN
-        # ====================================================
+        # ----------------------------------------------------
+        # JOIN MESSAGE
+        # ----------------------------------------------------
 
-        first_message =
+        first_message = (
             await websocket.receive_json()
+        )
 
 
         if (
@@ -2683,8 +2271,7 @@ async def websocket_endpoint(
                 websocket,
                 {
                     "type": "error",
-                    "message":
-                        "Join required",
+                    "message": "Join required",
                 },
             )
 
@@ -2693,13 +2280,12 @@ async def websocket_endpoint(
             return
 
 
-        nickname =
-            clean_nickname(
-                first_message.get(
-                    "nickname",
-                    "Guest",
-                )
+        nickname = clean_nickname(
+            first_message.get(
+                "nickname",
+                "Guest",
             )
+        )
 
 
         client = Client(
@@ -2709,77 +2295,70 @@ async def websocket_endpoint(
         )
 
 
-        room.clients[
-            client_id
-        ] = client
+        room.clients[client_id] = client
 
 
-        # ====================================================
-        # SEND CURRENT ROOM STATE TO NEW CLIENT
-        # ====================================================
+        # ----------------------------------------------------
+        # SEND CURRENT STATE
+        # ----------------------------------------------------
 
         await send_json(
             websocket,
-            make_full_state(room),
+            get_full_state(room),
         )
 
-
-        # ====================================================
-        # UPDATE PARTICIPANTS FOR EVERYONE
-        # ====================================================
 
         await broadcast_participants(
             room
         )
 
 
-        # ====================================================
+        # ----------------------------------------------------
         # MESSAGE LOOP
-        # ====================================================
+        # ----------------------------------------------------
 
         while True:
 
-            data =
+            data = (
                 await websocket.receive_json()
+            )
 
 
-            message_type =
-                data.get("type")
+            message_type = data.get(
+                "type"
+            )
 
 
-            # =================================================
+            # ================================================
             # REQUEST STATE
-            # =================================================
+            # ================================================
 
             if (
-                message_type
-                == "request_state"
+                message_type ==
+                "request_state"
             ):
 
                 await send_json(
                     websocket,
-                    make_full_state(
-                        room
-                    ),
+                    get_full_state(room),
                 )
 
 
-            # =================================================
+            # ================================================
             # SET VIDEO
-            # =================================================
+            # ================================================
 
             elif (
-                message_type
-                == "set_video"
+                message_type ==
+                "set_video"
             ):
 
-                video_id =
-                    extract_youtube_id(
-                        data.get(
-                            "video",
-                            "",
-                        )
+                video_id = extract_youtube_id(
+                    data.get(
+                        "video",
+                        "",
                     )
+                )
 
 
                 if not video_id:
@@ -2787,9 +2366,7 @@ async def websocket_endpoint(
                     await send_json(
                         websocket,
                         {
-                            "type":
-                                "error",
-
+                            "type": "error",
                             "message":
                                 "Invalid YouTube URL",
                         },
@@ -2798,44 +2375,33 @@ async def websocket_endpoint(
                     continue
 
 
-                # ---------------------------------------------
-                # CHANGE ROOM STATE
-                # ---------------------------------------------
-
-                room.video_id =
-                    video_id
-
-                room.playing = False
+                room.video_id = video_id
 
                 room.position = 0.0
 
-                room.updated_at =
+                room.playing = False
+
+                room.updated_at = (
                     time.monotonic()
+                )
 
-
-                # ---------------------------------------------
-                # SEND NEW VIDEO TO EVERYONE
-                # ---------------------------------------------
 
                 await broadcast(
                     room,
                     {
-                        "type":
-                            "video",
-
-                        "video_id":
-                            video_id,
+                        "type": "video",
+                        "video_id": video_id,
                     },
                 )
 
 
-            # =================================================
+            # ================================================
             # PLAY
-            # =================================================
+            # ================================================
 
             elif (
-                message_type
-                == "play"
+                message_type ==
+                "play"
             ):
 
                 if not room.video_id:
@@ -2844,62 +2410,58 @@ async def websocket_endpoint(
 
                 try:
 
-                    position =
-                        float(
-                            data.get(
-                                "position",
-                                0,
-                            )
+                    position = float(
+                        data.get(
+                            "position",
+                            0,
                         )
+                    )
 
                 except (
                     TypeError,
                     ValueError,
                 ):
 
-                    position =
-                        room.get_position()
-
-
-                position =
-                    max(
-                        0.0,
-                        position,
+                    position = (
+                        room.current_position()
                     )
 
 
-                room.position =
-                    position
+                position = max(
+                    0.0,
+                    position,
+                )
+
+
+                room.position = position
 
                 room.playing = True
 
-                room.updated_at =
+                room.updated_at = (
                     time.monotonic()
+                )
 
 
                 await broadcast(
                     room,
                     {
-                        "type":
-                            "play",
-
-                        "position":
-                            round(
-                                position,
-                                3,
-                            ),
+                        "type": "play",
+                        "position": round(
+                            position,
+                            3,
+                        ),
                     },
                     exclude=client_id,
                 )
 
 
-            # =================================================
+            # ================================================
             # PAUSE
-            # =================================================
+            # ================================================
 
             elif (
-                message_type
-                == "pause"
+                message_type ==
+                "pause"
             ):
 
                 if not room.video_id:
@@ -2908,62 +2470,58 @@ async def websocket_endpoint(
 
                 try:
 
-                    position =
-                        float(
-                            data.get(
-                                "position",
-                                0,
-                            )
+                    position = float(
+                        data.get(
+                            "position",
+                            0,
                         )
+                    )
 
                 except (
                     TypeError,
                     ValueError,
                 ):
 
-                    position =
-                        room.get_position()
-
-
-                position =
-                    max(
-                        0.0,
-                        position,
+                    position = (
+                        room.current_position()
                     )
 
 
-                room.position =
-                    position
+                position = max(
+                    0.0,
+                    position,
+                )
+
+
+                room.position = position
 
                 room.playing = False
 
-                room.updated_at =
+                room.updated_at = (
                     time.monotonic()
+                )
 
 
                 await broadcast(
                     room,
                     {
-                        "type":
-                            "pause",
-
-                        "position":
-                            round(
-                                position,
-                                3,
-                            ),
+                        "type": "pause",
+                        "position": round(
+                            position,
+                            3,
+                        ),
                     },
                     exclude=client_id,
                 )
 
 
-            # =================================================
+            # ================================================
             # SEEK
-            # =================================================
+            # ================================================
 
             elif (
-                message_type
-                == "seek"
+                message_type ==
+                "seek"
             ):
 
                 if not room.video_id:
@@ -2972,13 +2530,12 @@ async def websocket_endpoint(
 
                 try:
 
-                    position =
-                        float(
-                            data.get(
-                                "position",
-                                0,
-                            )
+                    position = float(
+                        data.get(
+                            "position",
+                            0,
                         )
+                    )
 
                 except (
                     TypeError,
@@ -2988,76 +2545,61 @@ async def websocket_endpoint(
                     continue
 
 
-                position =
-                    max(
-                        0.0,
-                        position,
-                    )
+                position = max(
+                    0.0,
+                    position,
+                )
 
 
-                room.position =
-                    position
+                room.position = position
 
-                room.updated_at =
+                room.updated_at = (
                     time.monotonic()
+                )
 
 
                 await broadcast(
                     room,
                     {
-                        "type":
-                            "seek",
-
-                        "position":
-                            round(
-                                position,
-                                3,
-                            ),
+                        "type": "seek",
+                        "position": round(
+                            position,
+                            3,
+                        ),
                     },
                     exclude=client_id,
                 )
 
 
-            # =================================================
+            # ================================================
             # CHAT
-            # =================================================
+            # ================================================
 
             elif (
-                message_type
-                == "chat"
+                message_type ==
+                "chat"
             ):
 
-                text =
-                    str(
-                        data.get(
-                            "text",
-                            "",
-                        )
-                    ).strip()
+                text = str(
+                    data.get(
+                        "text",
+                        "",
+                    )
+                ).strip()
 
 
                 if not text:
                     continue
 
 
-                text =
-                    text[:500]
+                text = text[:500]
 
 
                 message = {
-                    "id":
-                        secrets.token_hex(8),
-
-                    "nickname":
-                        nickname,
-
-                    "text":
-                        text,
-
-                    "time":
-                        int(
-                            time.time()
-                        ),
+                    "id": secrets.token_hex(8),
+                    "nickname": nickname,
+                    "text": text,
+                    "time": int(time.time()),
                 }
 
 
@@ -3068,18 +2610,16 @@ async def websocket_endpoint(
 
                 if len(room.chat) > 100:
 
-                    room.chat =
+                    room.chat = (
                         room.chat[-100:]
+                    )
 
 
                 await broadcast(
                     room,
                     {
-                        "type":
-                            "chat",
-
-                        "message":
-                            message,
+                        "type": "chat",
+                        "message": message,
                     },
                 )
 
@@ -3099,19 +2639,11 @@ async def websocket_endpoint(
 
     finally:
 
-        # ====================================================
-        # REMOVE CLIENT
-        # ====================================================
-
         room.clients.pop(
             client_id,
             None,
         )
 
-
-        # ====================================================
-        # UPDATE PARTICIPANTS
-        # ====================================================
 
         try:
 
@@ -3124,20 +2656,17 @@ async def websocket_endpoint(
             pass
 
 
-        # ====================================================
-        # REMOVE EMPTY ROOM
-        # ====================================================
-
         if not room.clients:
 
             async with rooms_lock:
 
+                current_room = rooms.get(
+                    room_id
+                )
+
                 if (
-                    room_id in rooms
-                    and
-                    not rooms[
-                        room_id
-                    ].clients
+                    current_room is room
+                    and not room.clients
                 ):
 
                     rooms.pop(
@@ -3147,15 +2676,13 @@ async def websocket_endpoint(
 
 
 # ============================================================
-# HEALTH
+# HEALTH CHECK
 # ============================================================
 
 @app.get("/health")
-async def health():
-
+async def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "rooms": len(rooms),
-        "service":
-            "watch-together",
+        "service": "watch-together",
     }

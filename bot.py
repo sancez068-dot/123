@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
+
 """
 WATCH TOGETHER
 Python 3.12.11
 FastAPI + WebSocket
-All-in-one server
+One-file application
 
-Запуск:
-    uvicorn r:app --host 0.0.0.0 --port $PORT
+Render Start Command:
+
+uvicorn r:app --host 0.0.0.0 --port $PORT
 """
 
 from __future__ import annotations
 
 import asyncio
-import html
 import re
 import secrets
 import time
@@ -20,15 +21,18 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 
 # ============================================================
 # APP
 # ============================================================
 
-app = FastAPI(title="Watch Together")
+app = FastAPI(
+    title="Watch Together",
+    version="1.0.0",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,7 +44,7 @@ app.add_middleware(
 
 
 # ============================================================
-# DATA
+# ROOM DATA
 # ============================================================
 
 @dataclass
@@ -53,23 +57,46 @@ class Client:
 @dataclass
 class Room:
     room_id: str
+
     video_id: str = ""
+
     playing: bool = False
     position: float = 0.0
-    updated_at: float = field(default_factory=time.monotonic)
-    clients: dict[str, Client] = field(default_factory=dict)
-    chat: list[dict[str, Any]] = field(default_factory=list)
 
-    def current_position(self) -> float:
-        if self.playing:
-            return max(
-                0.0,
-                self.position + (time.monotonic() - self.updated_at),
-            )
-        return max(0.0, self.position)
+    # monotonic timestamp corresponding to position
+    updated_at: float = field(
+        default_factory=time.monotonic
+    )
+
+    clients: dict[str, Client] = field(
+        default_factory=dict
+    )
+
+    chat: list[dict[str, Any]] = field(
+        default_factory=list
+    )
+
+    def get_position(self) -> float:
+        """
+        Calculate current video position.
+
+        If the room is playing, position advances
+        with time.
+        """
+
+        if not self.playing:
+            return max(0.0, self.position)
+
+        elapsed = time.monotonic() - self.updated_at
+
+        return max(
+            0.0,
+            self.position + elapsed,
+        )
 
 
 rooms: dict[str, Room] = {}
+
 rooms_lock = asyncio.Lock()
 
 
@@ -77,20 +104,30 @@ rooms_lock = asyncio.Lock()
 # HELPERS
 # ============================================================
 
-ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+ROOM_ALPHABET = (
+    "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+)
 
 
-def create_room_id(length: int = 6) -> str:
-    return "".join(secrets.choice(ROOM_ALPHABET) for _ in range(length))
+def generate_room_id(length: int = 6) -> str:
+    return "".join(
+        secrets.choice(ROOM_ALPHABET)
+        for _ in range(length)
+    )
 
 
-def create_client_id() -> str:
-    return secrets.token_urlsafe(12)
+def generate_client_id() -> str:
+    return secrets.token_urlsafe(16)
 
 
-def clean_nickname(value: str) -> str:
+def clean_nickname(value: Any) -> str:
     value = str(value or "").strip()
-    value = re.sub(r"\s+", " ", value)
+
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
+    )
 
     if not value:
         value = "Guest"
@@ -98,14 +135,23 @@ def clean_nickname(value: str) -> str:
     return value[:24]
 
 
-def extract_youtube_id(value: str) -> str | None:
+def extract_youtube_id(value: Any) -> str | None:
     """
-    Поддерживает:
-      https://www.youtube.com/watch?v=XXXXXXXXXXX
-      https://youtu.be/XXXXXXXXXXX
-      https://www.youtube.com/embed/XXXXXXXXXXX
-      https://www.youtube.com/shorts/XXXXXXXXXXX
-      обычный video ID
+    Extract YouTube video ID.
+
+    Supported:
+
+    https://www.youtube.com/watch?v=XXXXXXXXXXX
+
+    https://youtu.be/XXXXXXXXXXX
+
+    https://www.youtube.com/embed/XXXXXXXXXXX
+
+    https://www.youtube.com/shorts/XXXXXXXXXXX
+
+    https://www.youtube.com/live/XXXXXXXXXXX
+
+    Direct 11-character YouTube ID.
     """
 
     value = str(value or "").strip()
@@ -113,66 +159,113 @@ def extract_youtube_id(value: str) -> str | None:
     if not value:
         return None
 
-    # Уже ID
-    if re.fullmatch(r"[A-Za-z0-9_-]{11}", value):
+    # Direct ID
+    if re.fullmatch(
+        r"[A-Za-z0-9_-]{11}",
+        value,
+    ):
         return value
 
     patterns = [
-        r"(?:v=)([A-Za-z0-9_-]{11})",
-        r"(?:youtu\.be/)([A-Za-z0-9_-]{11})",
-        r"(?:youtube\.com/embed/)([A-Za-z0-9_-]{11})",
-        r"(?:youtube\.com/shorts/)([A-Za-z0-9_-]{11})",
-        r"(?:youtube\.com/live/)([A-Za-z0-9_-]{11})",
+        r"[?&]v=([A-Za-z0-9_-]{11})",
+        r"youtu\.be/([A-Za-z0-9_-]{11})",
+        r"youtube\.com/embed/([A-Za-z0-9_-]{11})",
+        r"youtube\.com/shorts/([A-Za-z0-9_-]{11})",
+        r"youtube\.com/live/([A-Za-z0-9_-]{11})",
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, value)
+        match = re.search(
+            pattern,
+            value,
+            flags=re.IGNORECASE,
+        )
+
         if match:
             return match.group(1)
 
     return None
 
 
-def room_state(room: Room) -> dict[str, Any]:
+def participants(room: Room) -> list[dict[str, str]]:
+    return [
+        {
+            "id": client.client_id,
+            "nickname": client.nickname,
+        }
+        for client in room.clients.values()
+    ]
+
+
+def make_full_state(room: Room) -> dict[str, Any]:
     return {
-        "type": "state",
+        "type": "full_state",
         "room": room.room_id,
         "video_id": room.video_id,
         "playing": room.playing,
-        "position": round(room.current_position(), 3),
-        "participants": [
-            {
-                "id": client.client_id,
-                "nickname": client.nickname,
-            }
-            for client in room.clients.values()
-        ],
+        "position": round(
+            room.get_position(),
+            3,
+        ),
+        "participants": participants(room),
         "chat": room.chat[-100:],
     }
 
 
+async def send_json(
+    websocket: WebSocket,
+    data: dict[str, Any],
+) -> bool:
+
+    try:
+        await websocket.send_json(data)
+        return True
+
+    except Exception:
+        return False
+
+
 async def broadcast(
     room: Room,
-    message: dict[str, Any],
+    data: dict[str, Any],
     exclude: str | None = None,
 ) -> None:
+
     dead: list[str] = []
 
-    for client_id, client in list(room.clients.items()):
+    for client_id, client in list(
+        room.clients.items()
+    ):
+
         if client_id == exclude:
             continue
 
-        try:
-            await client.websocket.send_json(message)
-        except Exception:
+        success = await send_json(
+            client.websocket,
+            data,
+        )
+
+        if not success:
             dead.append(client_id)
 
     for client_id in dead:
-        room.clients.pop(client_id, None)
+        room.clients.pop(
+            client_id,
+            None,
+        )
 
 
-async def broadcast_state(room: Room) -> None:
-    await broadcast(room, room_state(room))
+async def broadcast_participants(
+    room: Room,
+) -> None:
+
+    await broadcast(
+        room,
+        {
+            "type": "participants",
+            "participants": participants(room),
+        },
+    )
 
 
 # ============================================================
@@ -182,28 +275,31 @@ async def broadcast_state(room: Room) -> None:
 HTML = r"""
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
+
 <meta charset="UTF-8">
+
 <meta
     name="viewport"
     content="width=device-width, initial-scale=1.0, viewport-fit=cover"
 >
+
 <title>Watch Together</title>
 
 <style>
+
 * {
     box-sizing: border-box;
 }
 
 :root {
-    --bg: #09090b;
+    --bg: #08080a;
     --panel: #111114;
     --panel2: #18181c;
     --border: rgba(255,255,255,.08);
-    --text: #f4f4f5;
-    --muted: #a1a1aa;
-    --accent: #ffffff;
-    --danger: #ef4444;
+    --text: #f5f5f5;
+    --muted: #9b9ba3;
 }
 
 html,
@@ -211,16 +307,18 @@ body {
     width: 100%;
     height: 100%;
     margin: 0;
+
     background: var(--bg);
     color: var(--text);
+
     font-family:
         Inter,
-        ui-sans-serif,
         system-ui,
         -apple-system,
         BlinkMacSystemFont,
         "Segoe UI",
         sans-serif;
+
     overflow: hidden;
 }
 
@@ -230,33 +328,42 @@ input {
 }
 
 button {
-    border: 0;
     cursor: pointer;
 }
 
 #app {
     width: 100%;
     height: 100%;
+
     display: flex;
     flex-direction: column;
 }
 
-.topbar {
-    height: 64px;
-    min-height: 64px;
+
+/* ============================================================
+   HEADER
+   ============================================================ */
+
+.header {
+    height: 62px;
+    min-height: 62px;
+
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 0 18px;
-    background: rgba(9,9,11,.94);
-    border-bottom: 1px solid var(--border);
+
+    padding: 0 16px;
+
+    background: rgba(8,8,10,.96);
+
+    border-bottom:
+        1px solid var(--border);
+
     z-index: 20;
 }
 
 .logo {
+    font-size: 17px;
     font-weight: 800;
-    letter-spacing: -.5px;
-    white-space: nowrap;
 }
 
 .logo span {
@@ -264,55 +371,75 @@ button {
     font-weight: 500;
 }
 
-.room-info {
+.header-right {
+    margin-left: auto;
+
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-left: auto;
 }
 
-.room-code {
+.room-label {
     color: var(--muted);
-    font-size: 13px;
+    font-size: 12px;
 }
 
-.room-code strong {
+.room-label strong {
     color: var(--text);
 }
 
-.icon-btn {
+.icon-button {
     width: 40px;
     height: 40px;
+
     border-radius: 10px;
+
+    border:
+        1px solid var(--border);
+
     background: var(--panel2);
     color: var(--text);
-    border: 1px solid var(--border);
 }
 
-.icon-btn:hover {
-    background: #222227;
+.icon-button:hover {
+    background: #222228;
 }
+
+
+/* ============================================================
+   MAIN
+   ============================================================ */
 
 .main {
-    min-height: 0;
     flex: 1;
+    min-height: 0;
+
     display: flex;
+
     position: relative;
 }
 
-.video-area {
-    min-width: 0;
+.video-section {
     flex: 1;
+    min-width: 0;
+
     display: flex;
     flex-direction: column;
 }
 
-.player-wrap {
-    position: relative;
+
+/* ============================================================
+   PLAYER
+   ============================================================ */
+
+.player-container {
     width: 100%;
+
     aspect-ratio: 16 / 9;
-    max-height: calc(100vh - 170px);
+
     background: #000;
+
+    position: relative;
 }
 
 #player {
@@ -320,199 +447,300 @@ button {
     height: 100%;
 }
 
-.empty-player {
+.player-placeholder {
     position: absolute;
+
     inset: 0;
+
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 25px;
-    background:
-        radial-gradient(circle at center, #17171b 0%, #08080a 70%);
-    color: var(--muted);
+
     text-align: center;
+
+    color: var(--muted);
+
+    background:
+        radial-gradient(
+            circle at center,
+            #17171c,
+            #050507 70%
+        );
+
     pointer-events: none;
+
+    z-index: 2;
 }
 
-.empty-player.hidden {
+.player-placeholder.hidden {
     display: none;
 }
 
-.controls {
-    padding: 14px 16px;
+
+/* ============================================================
+   VIDEO BAR
+   ============================================================ */
+
+.video-bar {
     display: flex;
+
     gap: 8px;
-    border-bottom: 1px solid var(--border);
+
+    padding: 12px;
+
     background: var(--panel);
+
+    border-bottom:
+        1px solid var(--border);
 }
 
-.url-input {
-    min-width: 0;
+.video-input {
     flex: 1;
+    min-width: 0;
+
     height: 42px;
-    border: 1px solid var(--border);
-    outline: none;
-    border-radius: 10px;
+
     padding: 0 13px;
+
     color: var(--text);
-    background: #0d0d10;
-}
 
-.url-input:focus {
-    border-color: rgba(255,255,255,.2);
-}
+    background: #0c0c0f;
 
-.primary {
-    height: 42px;
-    padding: 0 18px;
+    border:
+        1px solid var(--border);
+
     border-radius: 10px;
-    color: #09090b;
+
+    outline: none;
+}
+
+.video-input:focus {
+    border-color:
+        rgba(255,255,255,.22);
+}
+
+.load-button {
+    height: 42px;
+
+    padding: 0 18px;
+
+    border: 0;
+
+    border-radius: 10px;
+
     background: #fff;
+
+    color: #000;
+
     font-weight: 700;
 }
 
-.primary:hover {
+.load-button:hover {
     opacity: .9;
 }
 
-.side {
+
+/* ============================================================
+   CHAT
+   ============================================================ */
+
+.chat-panel {
     width: 350px;
     min-width: 350px;
-    height: 100%;
+
     display: flex;
     flex-direction: column;
+
     background: var(--panel);
-    border-left: 1px solid var(--border);
+
+    border-left:
+        1px solid var(--border);
+
     transition:
-        transform .25s ease,
         width .25s ease,
-        min-width .25s ease;
+        min-width .25s ease,
+        transform .25s ease;
 }
 
-.side.hidden {
+.chat-panel.closed {
     width: 0;
     min-width: 0;
+
     overflow: hidden;
-    transform: translateX(100%);
 }
 
-.side-head {
+.chat-header {
     height: 56px;
     min-height: 56px;
+
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 0 12px 0 16px;
-    border-bottom: 1px solid var(--border);
+
+    padding: 0 10px 0 15px;
+
+    border-bottom:
+        1px solid var(--border);
 }
 
-.side-title {
+.chat-title {
     font-weight: 700;
 }
 
-.online {
+.chat-online {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 11px;
 }
 
-.chat {
+.chat-close {
+    margin-left: auto;
+}
+
+.chat-messages {
     flex: 1;
     min-height: 0;
+
     overflow-y: auto;
+
     padding: 14px;
 }
 
-.message {
-    margin-bottom: 12px;
+.chat-message {
+    margin-bottom: 13px;
 }
 
-.message-author {
-    font-size: 12px;
-    color: var(--muted);
+.chat-author {
     margin-bottom: 3px;
+
+    color: var(--muted);
+
+    font-size: 12px;
 }
 
-.message-text {
-    word-break: break-word;
+.chat-text {
     font-size: 14px;
+
     line-height: 1.4;
+
+    word-break: break-word;
 }
 
 .chat-form {
     display: flex;
+
     gap: 8px;
+
     padding: 12px;
-    border-top: 1px solid var(--border);
+
+    border-top:
+        1px solid var(--border);
 }
 
 .chat-input {
-    min-width: 0;
     flex: 1;
+    min-width: 0;
+
     height: 40px;
+
     padding: 0 12px;
+
+    border:
+        1px solid var(--border);
+
     border-radius: 9px;
-    outline: none;
-    border: 1px solid var(--border);
-    background: #0d0d10;
+
+    background: #0c0c0f;
     color: var(--text);
+
+    outline: none;
 }
 
-.send-btn {
+.send-button {
     width: 42px;
+
+    border: 0;
+
     border-radius: 9px;
+
     background: #fff;
+
     color: #000;
+
     font-weight: 800;
 }
 
-.bottom {
-    height: 52px;
-    min-height: 52px;
+
+/* ============================================================
+   FOOTER
+   ============================================================ */
+
+.footer {
+    height: 50px;
+    min-height: 50px;
+
     display: flex;
     align-items: center;
-    padding: 0 16px;
-    gap: 12px;
+
+    padding: 0 14px;
+
     background: var(--panel);
-    border-top: 1px solid var(--border);
+
+    border-top:
+        1px solid var(--border);
 }
 
-.status {
+.connection {
     display: flex;
     align-items: center;
+
     gap: 7px;
+
     color: var(--muted);
+
     font-size: 12px;
 }
 
-.status-dot {
+.connection-dot {
     width: 7px;
     height: 7px;
+
     border-radius: 50%;
+
     background: #22c55e;
 }
 
-.status-dot.offline {
-    background: var(--danger);
+.connection-dot.offline {
+    background: #ef4444;
 }
 
-.participants {
+.users {
     margin-left: auto;
-    display: flex;
-    align-items: center;
-    gap: 5px;
+
     color: var(--muted);
+
     font-size: 12px;
 }
 
+
+/* ============================================================
+   MODAL
+   ============================================================ */
+
 .modal {
     position: fixed;
+
     inset: 0;
+
     z-index: 100;
+
     display: flex;
     align-items: center;
     justify-content: center;
+
     padding: 20px;
-    background: rgba(0,0,0,.72);
+
+    background:
+        rgba(0,0,0,.78);
+
     backdrop-filter: blur(8px);
 }
 
@@ -521,207 +749,313 @@ button {
 }
 
 .modal-card {
-    width: min(430px, 100%);
+    width: min(420px, 100%);
+
     padding: 24px;
+
+    border:
+        1px solid var(--border);
+
     border-radius: 16px;
+
     background: #121216;
-    border: 1px solid var(--border);
-    box-shadow: 0 20px 80px rgba(0,0,0,.5);
 }
 
 .modal-title {
     margin: 0 0 7px;
+
     font-size: 22px;
 }
 
-.modal-subtitle {
+.modal-text {
     margin: 0 0 20px;
+
     color: var(--muted);
+
     font-size: 14px;
 }
 
-.modal-input {
+.nickname-input {
     width: 100%;
+
     height: 44px;
-    border-radius: 10px;
-    border: 1px solid var(--border);
-    outline: none;
-    background: #0c0c0f;
-    color: var(--text);
+
     padding: 0 13px;
+
+    border:
+        1px solid var(--border);
+
+    border-radius: 10px;
+
+    background: #0b0b0e;
+
+    color: var(--text);
+
+    outline: none;
 }
 
-.modal-button {
+.join-button {
     width: 100%;
+
     height: 44px;
+
     margin-top: 10px;
+
+    border: 0;
+
     border-radius: 10px;
+
     background: #fff;
+
     color: #000;
+
     font-weight: 700;
 }
 
+
+/* ============================================================
+   TOAST
+   ============================================================ */
+
 .toast {
     position: fixed;
+
     left: 50%;
-    bottom: 75px;
-    transform: translateX(-50%) translateY(15px);
+    bottom: 70px;
+
+    transform:
+        translate(-50%, 15px);
+
+    opacity: 0;
+
+    pointer-events: none;
+
+    z-index: 300;
+
     padding: 10px 14px;
+
     border-radius: 9px;
+
     background: #fff;
     color: #000;
+
     font-size: 13px;
-    opacity: 0;
-    pointer-events: none;
+
     transition: .2s ease;
-    z-index: 200;
 }
 
 .toast.show {
     opacity: 1;
-    transform: translateX(-50%) translateY(0);
+
+    transform:
+        translate(-50%, 0);
 }
 
+
+/* ============================================================
+   MOBILE
+   ============================================================ */
+
 @media (max-width: 800px) {
-    .topbar {
+
+    .header {
         padding: 0 10px;
     }
 
-    .room-info {
-        margin-left: auto;
-    }
-
-    .room-code {
+    .room-label {
         display: none;
     }
 
-    .main {
-        overflow: hidden;
-    }
-
-    .video-area {
-        width: 100%;
-    }
-
-    .player-wrap {
+    .player-container {
         aspect-ratio: 16 / 9;
-        max-height: none;
     }
 
-    .side {
-        position: absolute;
-        right: 0;
-        top: 0;
-        bottom: 0;
-        width: min(360px, 92vw);
-        min-width: min(360px, 92vw);
-        z-index: 50;
-        box-shadow: -20px 0 60px rgba(0,0,0,.45);
-    }
-
-    .side.hidden {
-        width: min(360px, 92vw);
-        min-width: min(360px, 92vw);
-        transform: translateX(105%);
-    }
-
-    .controls {
+    .video-bar {
         flex-wrap: wrap;
     }
 
-    .url-input {
-        width: 100%;
+    .video-input {
         flex-basis: 100%;
+        width: 100%;
     }
 
-    .primary {
+    .load-button {
         flex: 1;
     }
+
+    .chat-panel {
+        position: absolute;
+
+        right: 0;
+        top: 0;
+        bottom: 0;
+
+        width: min(360px, 92vw);
+        min-width: min(360px, 92vw);
+
+        z-index: 50;
+
+        box-shadow:
+            -20px 0 60px
+            rgba(0,0,0,.5);
+    }
+
+    .chat-panel.closed {
+        width: min(360px, 92vw);
+        min-width: min(360px, 92vw);
+
+        transform:
+            translateX(105%);
+    }
 }
+
 </style>
+
 </head>
+
 
 <body>
 
+
 <div id="app">
 
-    <header class="topbar">
+
+    <!-- HEADER -->
+
+    <header class="header">
+
         <div class="logo">
             Watch<span>Together</span>
         </div>
 
-        <div class="room-info">
-            <div class="room-code">
-                ROOM <strong id="roomCode">------</strong>
+        <div class="header-right">
+
+            <div class="room-label">
+                ROOM
+                <strong id="roomCode">------</strong>
             </div>
 
             <button
-                class="icon-btn"
-                id="copyRoom"
+                id="copyButton"
+                class="icon-button"
                 title="Copy room link"
-            >🔗</button>
+            >
+                🔗
+            </button>
 
             <button
-                class="icon-btn"
-                id="chatToggle"
-                title="Toggle chat"
-            >💬</button>
+                id="chatButton"
+                class="icon-button"
+                title="Chat"
+            >
+                💬
+            </button>
+
         </div>
+
     </header>
+
+
+    <!-- MAIN -->
 
     <main class="main">
 
-        <section class="video-area">
 
-            <div class="player-wrap">
-                <div id="player"></div>
+        <!-- VIDEO -->
 
-                <div id="emptyPlayer" class="empty-player">
+        <section class="video-section">
+
+            <div class="player-container">
+
+                <div
+                    id="player"
+                ></div>
+
+                <div
+                    id="placeholder"
+                    class="player-placeholder"
+                >
                     <div>
-                        <strong>No video loaded</strong><br>
+                        <strong>
+                            No video loaded
+                        </strong>
+
+                        <br>
+
                         Paste a YouTube link below
                     </div>
                 </div>
+
             </div>
 
-            <div class="controls">
+
+            <div class="video-bar">
+
                 <input
                     id="videoInput"
-                    class="url-input"
+                    class="video-input"
                     type="text"
                     placeholder="Paste YouTube URL..."
                     autocomplete="off"
                 >
 
                 <button
-                    id="loadVideo"
-                    class="primary"
+                    id="loadButton"
+                    class="load-button"
                 >
                     Load video
                 </button>
+
             </div>
 
         </section>
 
-        <aside id="side" class="side">
 
-            <div class="side-head">
+        <!-- CHAT -->
+
+        <aside
+            id="chatPanel"
+            class="chat-panel"
+        >
+
+            <div class="chat-header">
+
                 <div>
-                    <div class="side-title">Chat</div>
-                    <div class="online">
-                        <span id="onlineCount">0</span> online
+
+                    <div class="chat-title">
+                        Chat
                     </div>
+
+                    <div class="chat-online">
+                        <span id="onlineCount">
+                            0
+                        </span>
+                        online
+                    </div>
+
                 </div>
 
                 <button
                     id="closeChat"
-                    class="icon-btn"
-                >→</button>
+                    class="icon-button chat-close"
+                >
+                    →
+                </button>
+
             </div>
 
-            <div id="chat" class="chat"></div>
 
-            <form id="chatForm" class="chat-form">
+            <div
+                id="chatMessages"
+                class="chat-messages"
+            ></div>
+
+
+            <form
+                id="chatForm"
+                class="chat-form"
+            >
+
                 <input
                     id="chatInput"
                     class="chat-input"
@@ -731,41 +1065,71 @@ button {
                 >
 
                 <button
-                    class="send-btn"
+                    class="send-button"
                     type="submit"
-                >↑</button>
+                >
+                    ↑
+                </button>
+
             </form>
 
         </aside>
 
+
     </main>
 
-    <footer class="bottom">
 
-        <div class="status">
-            <span id="statusDot" class="status-dot"></span>
-            <span id="statusText">Connecting...</span>
+    <!-- FOOTER -->
+
+    <footer class="footer">
+
+        <div class="connection">
+
+            <span
+                id="connectionDot"
+                class="connection-dot offline"
+            ></span>
+
+            <span id="connectionText">
+                Connecting...
+            </span>
+
         </div>
 
-        <div class="participants">
-            👥 <span id="participantCount">0</span>
+
+        <div class="users">
+            👥
+            <span id="usersCount">
+                0
+            </span>
         </div>
 
     </footer>
 
+
 </div>
 
 
-<div id="nicknameModal" class="modal">
+<!-- NICKNAME MODAL -->
+
+<div
+    id="nicknameModal"
+    class="modal"
+>
+
     <div class="modal-card">
-        <h2 class="modal-title">Join room</h2>
-        <p class="modal-subtitle">
-            Choose a nickname to enter the watch room.
+
+        <h2 class="modal-title">
+            Join room
+        </h2>
+
+        <p class="modal-text">
+            Choose a nickname.
         </p>
 
         <input
             id="nicknameInput"
-            class="modal-input"
+            class="nickname-input"
             maxlength="24"
             placeholder="Your nickname"
             autocomplete="off"
@@ -773,50 +1137,131 @@ button {
 
         <button
             id="joinButton"
-            class="modal-button"
+            class="join-button"
         >
             Join room
         </button>
+
     </div>
+
 </div>
 
 
-<div id="toast" class="toast"></div>
+<div
+    id="toast"
+    class="toast"
+></div>
 
+
+<!-- ============================================================
+     YOUTUBE API
+     ============================================================ -->
 
 <script src="https://www.youtube.com/iframe_api"></script>
 
+
 <script>
+
 "use strict";
 
-const roomId = location.pathname.startsWith("/r/")
-    ? location.pathname.split("/")[2]
-    : null;
 
-let ws = null;
+/* ============================================================
+   VARIABLES
+   ============================================================ */
+
+const roomId =
+    location.pathname.startsWith("/r/")
+        ? location.pathname
+            .split("/")[2]
+            .toUpperCase()
+        : null;
+
+
+let websocket = null;
+
 let player = null;
+
 let playerReady = false;
-let applyingRemoteState = false;
-let currentVideoId = "";
+
 let nickname = "";
+
+let currentVideoId = "";
+
 let reconnectTimer = null;
-let suppressPlayerEventsUntil = 0;
 
-const $ = (id) => document.getElementById(id);
+let intentionallyClosed = false;
 
-const side = $("side");
-const chat = $("chat");
-const chatInput = $("chatInput");
-const videoInput = $("videoInput");
-const emptyPlayer = $("emptyPlayer");
 
-$("roomCode").textContent = roomId || "------";
+/*
+    Prevent local YouTube events generated by
+    remote commands from being sent back.
+*/
 
+let suppressEventsUntil = 0;
+
+
+/*
+    Last position known locally.
+
+    Used to detect manual seeking because
+    YouTube IFrame API doesn't expose a simple
+    "seek" event.
+*/
+
+let lastKnownPosition = 0;
+
+let lastKnownPlayerState = -1;
+
+
+/*
+    Prevent the sync loop from sending repeatedly.
+*/
+
+let lastSentSeek = -1;
+
+
+/* ============================================================
+   DOM
+   ============================================================ */
+
+const chatPanel =
+    document.getElementById("chatPanel");
+
+const chatMessages =
+    document.getElementById("chatMessages");
+
+const chatInput =
+    document.getElementById("chatInput");
+
+const videoInput =
+    document.getElementById("videoInput");
+
+const placeholder =
+    document.getElementById("placeholder");
+
+const nicknameModal =
+    document.getElementById("nicknameModal");
+
+const nicknameInput =
+    document.getElementById("nicknameInput");
+
+const toast =
+    document.getElementById("toast");
+
+
+document.getElementById(
+    "roomCode"
+).textContent = roomId || "------";
+
+
+/* ============================================================
+   TOAST
+   ============================================================ */
 
 function showToast(text) {
-    const toast = $("toast");
 
     toast.textContent = text;
+
     toast.classList.add("show");
 
     setTimeout(() => {
@@ -825,279 +1270,907 @@ function showToast(text) {
 }
 
 
-function setConnection(connected) {
-    $("statusText").textContent =
-        connected ? "Connected" : "Disconnected";
+/* ============================================================
+   CONNECTION UI
+   ============================================================ */
 
-    $("statusDot").classList.toggle(
+function setConnection(connected) {
+
+    const dot =
+        document.getElementById(
+            "connectionDot"
+        );
+
+    const text =
+        document.getElementById(
+            "connectionText"
+        );
+
+    dot.classList.toggle(
         "offline",
         !connected
     );
+
+    text.textContent =
+        connected
+            ? "Connected"
+            : "Disconnected";
 }
 
 
-function appendMessage(message) {
-    const wrapper = document.createElement("div");
-    wrapper.className = "message";
+/* ============================================================
+   WEBSOCKET SEND
+   ============================================================ */
 
-    const author = document.createElement("div");
-    author.className = "message-author";
-    author.textContent = message.nickname || "Guest";
+function send(data) {
 
-    const text = document.createElement("div");
-    text.className = "message-text";
-    text.textContent = message.text || "";
+    if (
+        !websocket ||
+        websocket.readyState !== WebSocket.OPEN
+    ) {
+        return false;
+    }
+
+    try {
+
+        websocket.send(
+            JSON.stringify(data)
+        );
+
+        return true;
+
+    } catch (error) {
+
+        return false;
+    }
+}
+
+
+/* ============================================================
+   CHAT
+   ============================================================ */
+
+function clearChat() {
+    chatMessages.innerHTML = "";
+}
+
+
+function addChatMessage(message) {
+
+    const wrapper =
+        document.createElement("div");
+
+    wrapper.className =
+        "chat-message";
+
+
+    const author =
+        document.createElement("div");
+
+    author.className =
+        "chat-author";
+
+    author.textContent =
+        message.nickname || "Guest";
+
+
+    const text =
+        document.createElement("div");
+
+    text.className =
+        "chat-text";
+
+    text.textContent =
+        message.text || "";
+
 
     wrapper.appendChild(author);
     wrapper.appendChild(text);
 
-    chat.appendChild(wrapper);
-    chat.scrollTop = chat.scrollHeight;
+    chatMessages.appendChild(wrapper);
+
+    chatMessages.scrollTop =
+        chatMessages.scrollHeight;
 }
 
 
-function clearChat() {
-    chat.innerHTML = "";
+/* ============================================================
+   PARTICIPANTS
+   ============================================================ */
+
+function updateParticipants(list) {
+
+    const count =
+        Array.isArray(list)
+            ? list.length
+            : 0;
+
+    document.getElementById(
+        "onlineCount"
+    ).textContent = count;
+
+    document.getElementById(
+        "usersCount"
+    ).textContent = count;
 }
 
 
-function updateParticipants(participants) {
-    const count = participants.length;
+/* ============================================================
+   YOUTUBE API
+   ============================================================ */
 
-    $("onlineCount").textContent = count;
-    $("participantCount").textContent = count;
-}
+window.onYouTubeIframeAPIReady = function () {
 
-
-function send(data) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-        showToast("Not connected");
-        return false;
-    }
-
-    ws.send(JSON.stringify(data));
-    return true;
-}
+    createPlayer();
+};
 
 
-function applyState(state) {
-    updateParticipants(state.participants || []);
+function createPlayer() {
 
-    if (state.chat) {
-        clearChat();
-
-        for (const message of state.chat) {
-            appendMessage(message);
-        }
-    }
-
-    const videoId = state.video_id || "";
-
-    if (!videoId) {
-        currentVideoId = "";
-        emptyPlayer.classList.remove("hidden");
+    if (player) {
         return;
     }
 
-    emptyPlayer.classList.add("hidden");
+    player =
+        new YT.Player(
+            "player",
+            {
+                width: "100%",
+                height: "100%",
+
+                playerVars: {
+                    autoplay: 0,
+                    controls: 1,
+                    rel: 0,
+                    modestbranding: 1,
+                    playsinline: 1,
+                    origin: location.origin
+                },
+
+                events: {
+
+                    onReady:
+                        onPlayerReady,
+
+                    onStateChange:
+                        onPlayerStateChange
+                }
+            }
+        );
+}
+
+
+function onPlayerReady() {
+
+    playerReady = true;
+
+    /*
+        Ask server for current room state.
+
+        This is important if the user joined
+        an already-running room.
+    */
+
+    send({
+        type: "request_state"
+    });
+}
+
+
+/* ============================================================
+   PLAYER STATE CHANGE
+   ============================================================ */
+
+function onPlayerStateChange(event) {
+
+    if (!playerReady) {
+        return;
+    }
+
+
+    const state =
+        event.data;
+
+
+    /*
+        Ignore events generated by remote commands.
+    */
+
+    if (
+        Date.now() <
+        suppressEventsUntil
+    ) {
+        lastKnownPlayerState = state;
+
+        if (player) {
+            lastKnownPosition =
+                player.getCurrentTime() || 0;
+        }
+
+        return;
+    }
+
+
+    if (!player) {
+        return;
+    }
+
+
+    const position =
+        player.getCurrentTime() || 0;
+
+
+    /*
+        PLAYING
+    */
+
+    if (
+        state ===
+        YT.PlayerState.PLAYING
+    ) {
+
+        send({
+            type: "play",
+            position: position
+        });
+    }
+
+
+    /*
+        PAUSED
+    */
+
+    else if (
+        state ===
+        YT.PlayerState.PAUSED
+    ) {
+
+        send({
+            type: "pause",
+            position: position
+        });
+    }
+
+
+    lastKnownPlayerState =
+        state;
+
+    lastKnownPosition =
+        position;
+}
+
+
+/* ============================================================
+   APPLY SERVER STATE
+   ============================================================ */
+
+function applyFullState(data) {
+
+    updateParticipants(
+        data.participants || []
+    );
+
+
+    /*
+        Chat
+    */
+
+    clearChat();
+
+    for (
+        const message
+        of (data.chat || [])
+    ) {
+
+        addChatMessage(message);
+    }
+
+
+    /*
+        No video
+    */
+
+    if (!data.video_id) {
+
+        currentVideoId = "";
+
+        placeholder.classList.remove(
+            "hidden"
+        );
+
+        return;
+    }
+
+
+    placeholder.classList.add(
+        "hidden"
+    );
+
 
     if (!playerReady || !player) {
         return;
     }
 
-    applyingRemoteState = true;
-    suppressPlayerEventsUntil = Date.now() + 700;
 
-    if (currentVideoId !== videoId) {
-        currentVideoId = videoId;
+    const videoId =
+        data.video_id;
+
+    const position =
+        Number(data.position || 0);
+
+
+    /*
+        Suppress events caused by
+        this remote state.
+    */
+
+    suppressEventsUntil =
+        Date.now() + 1200;
+
+
+    /*
+        Different video.
+    */
+
+    if (
+        currentVideoId !==
+        videoId
+    ) {
+
+        currentVideoId =
+            videoId;
+
 
         player.loadVideoById({
             videoId: videoId,
-            startSeconds: Number(state.position || 0)
+            startSeconds: position
         });
 
-        if (!state.playing) {
-            setTimeout(() => {
-                if (player) {
-                    player.pauseVideo();
-                }
-            }, 300);
-        }
 
-    } else {
-        const target = Number(state.position || 0);
-        const local = player.getCurrentTime() || 0;
+        /*
+            loadVideoById may autoplay
+            depending on browser/player state.
 
-        if (Math.abs(local - target) > 1.5) {
-            player.seekTo(target, true);
-        }
+            Force the correct state after
+            a short delay.
+        */
 
-        if (state.playing) {
-            player.playVideo();
-        } else {
-            player.pauseVideo();
-        }
+        setTimeout(() => {
+
+            if (!player) {
+                return;
+            }
+
+            if (data.playing) {
+
+                player.playVideo();
+
+            } else {
+
+                player.pauseVideo();
+            }
+
+        }, 500);
+
+
+        lastKnownPosition =
+            position;
+
+        return;
     }
 
-    setTimeout(() => {
-        applyingRemoteState = false;
-    }, 800);
+
+    /*
+        Same video.
+    */
+
+    const localPosition =
+        player.getCurrentTime() || 0;
+
+
+    /*
+        Correct large drift.
+    */
+
+    if (
+        Math.abs(
+            localPosition - position
+        ) > 1.25
+    ) {
+
+        player.seekTo(
+            position,
+            true
+        );
+    }
+
+
+    /*
+        Correct play state.
+    */
+
+    if (data.playing) {
+
+        player.playVideo();
+
+    } else {
+
+        player.pauseVideo();
+    }
+
+
+    lastKnownPosition =
+        position;
 }
 
+
+/* ============================================================
+   REMOTE PLAY
+   ============================================================ */
+
+function applyRemotePlay(position) {
+
+    if (!playerReady || !player) {
+        return;
+    }
+
+
+    suppressEventsUntil =
+        Date.now() + 1000;
+
+
+    const local =
+        player.getCurrentTime() || 0;
+
+
+    if (
+        Math.abs(local - position)
+        > 1.25
+    ) {
+
+        player.seekTo(
+            position,
+            true
+        );
+    }
+
+
+    player.playVideo();
+
+
+    lastKnownPosition =
+        position;
+}
+
+
+/* ============================================================
+   REMOTE PAUSE
+   ============================================================ */
+
+function applyRemotePause(position) {
+
+    if (!playerReady || !player) {
+        return;
+    }
+
+
+    suppressEventsUntil =
+        Date.now() + 1000;
+
+
+    const local =
+        player.getCurrentTime() || 0;
+
+
+    if (
+        Math.abs(local - position)
+        > 1.25
+    ) {
+
+        player.seekTo(
+            position,
+            true
+        );
+    }
+
+
+    player.pauseVideo();
+
+
+    lastKnownPosition =
+        position;
+}
+
+
+/* ============================================================
+   REMOTE SEEK
+   ============================================================ */
+
+function applyRemoteSeek(position) {
+
+    if (!playerReady || !player) {
+        return;
+    }
+
+
+    suppressEventsUntil =
+        Date.now() + 800;
+
+
+    player.seekTo(
+        position,
+        true
+    );
+
+
+    lastKnownPosition =
+        position;
+}
+
+
+/* ============================================================
+   REMOTE VIDEO
+   ============================================================ */
+
+function applyRemoteVideo(videoId) {
+
+    if (!playerReady || !player) {
+        return;
+    }
+
+
+    currentVideoId =
+        videoId;
+
+
+    placeholder.classList.add(
+        "hidden"
+    );
+
+
+    suppressEventsUntil =
+        Date.now() + 1500;
+
+
+    player.loadVideoById({
+        videoId: videoId,
+        startSeconds: 0
+    });
+
+
+    /*
+        New videos start paused.
+
+        Server will send the actual play state
+        separately if required.
+    */
+
+    setTimeout(() => {
+
+        if (player) {
+            player.pauseVideo();
+        }
+
+    }, 400);
+
+
+    lastKnownPosition = 0;
+}
+
+
+/* ============================================================
+   HANDLE WEBSOCKET MESSAGE
+   ============================================================ */
 
 function handleMessage(data) {
 
-    if (data.type === "state") {
-        applyState(data);
+    if (!data || !data.type) {
         return;
     }
 
-    if (data.type === "chat") {
-        appendMessage(data.message);
+
+    /*
+        Full state
+    */
+
+    if (
+        data.type ===
+        "full_state"
+    ) {
+
+        applyFullState(data);
+
         return;
     }
 
-    if (data.type === "participants") {
-        updateParticipants(data.participants || []);
+
+    /*
+        New video
+    */
+
+    if (
+        data.type ===
+        "video"
+    ) {
+
+        applyRemoteVideo(
+            data.video_id
+        );
+
         return;
     }
 
-    if (data.type === "error") {
-        showToast(data.message || "Error");
+
+    /*
+        Play
+    */
+
+    if (
+        data.type ===
+        "play"
+    ) {
+
+        applyRemotePlay(
+            Number(
+                data.position || 0
+            )
+        );
+
         return;
     }
 
-    if (data.type === "room_created") {
+
+    /*
+        Pause
+    */
+
+    if (
+        data.type ===
+        "pause"
+    ) {
+
+        applyRemotePause(
+            Number(
+                data.position || 0
+            )
+        );
+
+        return;
+    }
+
+
+    /*
+        Seek
+    */
+
+    if (
+        data.type ===
+        "seek"
+    ) {
+
+        applyRemoteSeek(
+            Number(
+                data.position || 0
+            )
+        );
+
+        return;
+    }
+
+
+    /*
+        Chat
+    */
+
+    if (
+        data.type ===
+        "chat"
+    ) {
+
+        addChatMessage(
+            data.message
+        );
+
+        return;
+    }
+
+
+    /*
+        Participants
+    */
+
+    if (
+        data.type ===
+        "participants"
+    ) {
+
+        updateParticipants(
+            data.participants || []
+        );
+
+        return;
+    }
+
+
+    /*
+        Error
+    */
+
+    if (
+        data.type ===
+        "error"
+    ) {
+
+        showToast(
+            data.message ||
+            "Server error"
+        );
+
         return;
     }
 }
 
 
+/* ============================================================
+   CONNECT
+   ============================================================ */
+
 function connect() {
-    if (!roomId || !nickname) {
+
+    if (
+        !roomId ||
+        !nickname
+    ) {
         return;
     }
 
-    if (ws) {
+
+    if (
+        websocket &&
+        websocket.readyState ===
+        WebSocket.OPEN
+    ) {
+        return;
+    }
+
+
+    if (websocket) {
+
         try {
-            ws.close();
+            websocket.close();
         } catch (_) {}
     }
+
 
     const protocol =
         location.protocol === "https:"
             ? "wss:"
             : "ws:";
 
-    ws = new WebSocket(
+
+    const url =
         protocol +
         "//" +
         location.host +
         "/ws/" +
-        encodeURIComponent(roomId)
-    );
-
-    ws.onopen = () => {
-        setConnection(true);
-
-        send({
-            type: "join",
-            nickname: nickname
-        });
-    };
-
-    ws.onmessage = (event) => {
-        try {
-            const data = JSON.parse(event.data);
-            handleMessage(data);
-        } catch (_) {}
-    };
-
-    ws.onclose = () => {
-        setConnection(false);
-
-        if (reconnectTimer) {
-            clearTimeout(reconnectTimer);
-        }
-
-        reconnectTimer = setTimeout(() => {
-            connect();
-        }, 2000);
-    };
-
-    ws.onerror = () => {
-        setConnection(false);
-    };
-}
+        encodeURIComponent(
+            roomId
+        );
 
 
-function createPlayer() {
-    player = new YT.Player("player", {
-        width: "100%",
-        height: "100%",
-        videoId: "",
-        playerVars: {
-            autoplay: 0,
-            controls: 1,
-            rel: 0,
-            modestbranding: 1,
-            playsinline: 1
-        },
+    websocket =
+        new WebSocket(url);
 
-        events: {
-            onReady: () => {
-                playerReady = true;
 
-                send({
-                    type: "request_state"
-                });
-            },
+    websocket.onopen =
+        function () {
 
-            onStateChange: (event) => {
+            setConnection(true);
 
-                if (
-                    applyingRemoteState ||
-                    Date.now() < suppressPlayerEventsUntil
-                ) {
-                    return;
-                }
 
-                if (!playerReady) {
-                    return;
-                }
+            send({
+                type: "join",
+                nickname: nickname
+            });
+        };
 
-                const position =
-                    player.getCurrentTime() || 0;
 
-                if (event.data === YT.PlayerState.PLAYING) {
+    websocket.onmessage =
+        function (event) {
 
-                    send({
-                        type: "play",
-                        position: position
-                    });
+            try {
 
-                } else if (
-                    event.data === YT.PlayerState.PAUSED
-                ) {
+                const data =
+                    JSON.parse(
+                        event.data
+                    );
 
-                    send({
-                        type: "pause",
-                        position: position
-                    });
-                }
+                handleMessage(data);
+
+            } catch (error) {
+
+                console.error(
+                    "Invalid WebSocket message",
+                    error
+                );
             }
-        }
-    });
+        };
+
+
+    websocket.onerror =
+        function () {
+
+            setConnection(false);
+        };
+
+
+    websocket.onclose =
+        function () {
+
+            setConnection(false);
+
+
+            if (
+                intentionallyClosed
+            ) {
+                return;
+            }
+
+
+            clearTimeout(
+                reconnectTimer
+            );
+
+
+            reconnectTimer =
+                setTimeout(
+                    () => {
+                        connect();
+                    },
+                    2000
+                );
+        };
 }
 
+
+/* ============================================================
+   LOAD VIDEO
+   ============================================================ */
 
 function loadVideo() {
-    const value = videoInput.value.trim();
+
+    const value =
+        videoInput.value.trim();
+
 
     if (!value) {
-        showToast("Paste a YouTube link");
+
+        showToast(
+            "Paste a YouTube link"
+        );
+
         return;
     }
+
+
+    if (
+        !websocket ||
+        websocket.readyState !==
+        WebSocket.OPEN
+    ) {
+
+        showToast(
+            "Not connected"
+        );
+
+        return;
+    }
+
+
+    /*
+        The server extracts and validates
+        the actual YouTube ID.
+    */
 
     send({
         type: "set_video",
@@ -1106,187 +2179,528 @@ function loadVideo() {
 }
 
 
-$("loadVideo").addEventListener("click", loadVideo);
+document.getElementById(
+    "loadButton"
+).addEventListener(
+    "click",
+    loadVideo
+);
 
-videoInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-        loadVideo();
+
+videoInput.addEventListener(
+    "keydown",
+    function (event) {
+
+        if (
+            event.key === "Enter"
+        ) {
+
+            event.preventDefault();
+
+            loadVideo();
+        }
     }
-});
+);
 
 
-$("chatForm").addEventListener("submit", (event) => {
-    event.preventDefault();
+/* ============================================================
+   CHAT
+   ============================================================ */
 
-    const text = chatInput.value.trim();
+document.getElementById(
+    "chatForm"
+).addEventListener(
+    "submit",
+    function (event) {
 
-    if (!text) {
-        return;
+        event.preventDefault();
+
+
+        const text =
+            chatInput.value.trim();
+
+
+        if (!text) {
+            return;
+        }
+
+
+        send({
+            type: "chat",
+            text: text
+        });
+
+
+        chatInput.value = "";
+
+        chatInput.focus();
     }
-
-    send({
-        type: "chat",
-        text: text
-    });
-
-    chatInput.value = "";
-    chatInput.focus();
-});
+);
 
 
-$("chatToggle").addEventListener("click", () => {
-    side.classList.toggle("hidden");
-});
+/* ============================================================
+   CHAT TOGGLE
+   ============================================================ */
 
+document.getElementById(
+    "chatButton"
+).addEventListener(
+    "click",
+    function () {
 
-$("closeChat").addEventListener("click", () => {
-    side.classList.add("hidden");
-});
-
-
-$("copyRoom").addEventListener("click", async () => {
-    try {
-        await navigator.clipboard.writeText(location.href);
-        showToast("Room link copied");
-    } catch (_) {
-        showToast(location.href);
+        chatPanel.classList.toggle(
+            "closed"
+        );
     }
-});
+);
 
 
-$("nicknameInput").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-        $("joinButton").click();
+document.getElementById(
+    "closeChat"
+).addEventListener(
+    "click",
+    function () {
+
+        chatPanel.classList.add(
+            "closed"
+        );
     }
-});
+);
 
 
-$("joinButton").addEventListener("click", () => {
-    nickname = $("nicknameInput").value.trim();
+/* ============================================================
+   COPY ROOM
+   ============================================================ */
 
-    if (!nickname) {
-        nickname = "Guest";
+document.getElementById(
+    "copyButton"
+).addEventListener(
+    "click",
+    async function () {
+
+        try {
+
+            await navigator.clipboard.writeText(
+                location.href
+            );
+
+            showToast(
+                "Room link copied"
+            );
+
+        } catch (_) {
+
+            showToast(
+                location.href
+            );
+        }
     }
+);
 
-    nickname = nickname.slice(0, 24);
 
-    localStorage.setItem(
-        "watch_together_nickname",
-        nickname
-    );
+/* ============================================================
+   POSITION / SEEK DETECTOR
+   ============================================================ */
 
-    $("nicknameModal").classList.add("hidden");
+setInterval(
+    function () {
 
-    connect();
-});
+        if (
+            !playerReady ||
+            !player
+        ) {
+            return;
+        }
 
+
+        if (
+            !websocket ||
+            websocket.readyState !==
+            WebSocket.OPEN
+        ) {
+            return;
+        }
+
+
+        if (
+            Date.now() <
+            suppressEventsUntil
+        ) {
+            return;
+        }
+
+
+        let position = 0;
+
+        let state = -1;
+
+
+        try {
+
+            position =
+                player.getCurrentTime() || 0;
+
+            state =
+                player.getPlayerState();
+
+        } catch (_) {
+
+            return;
+        }
+
+
+        /*
+            Detect manual seek.
+
+            Normal playback changes by approximately
+            the elapsed time.
+
+            A large jump indicates seek.
+        */
+
+        const difference =
+            Math.abs(
+                position -
+                lastKnownPosition
+            );
+
+
+        if (
+            state ===
+                YT.PlayerState.PLAYING &&
+            difference > 1.5
+        ) {
+
+            /*
+                Don't send the same seek repeatedly.
+            */
+
+            if (
+                Math.abs(
+                    position -
+                    lastSentSeek
+                ) > 1
+            ) {
+
+                send({
+                    type: "seek",
+                    position: position
+                });
+
+                lastSentSeek =
+                    position;
+            }
+        }
+
+
+        /*
+            When paused, a position jump is
+            also a seek.
+        */
+
+        else if (
+            state ===
+                YT.PlayerState.PAUSED &&
+            difference > 1.5
+        ) {
+
+            if (
+                Math.abs(
+                    position -
+                    lastSentSeek
+                ) > 1
+            ) {
+
+                send({
+                    type: "seek",
+                    position: position
+                });
+
+                lastSentSeek =
+                    position;
+            }
+        }
+
+
+        lastKnownPosition =
+            position;
+
+        lastKnownPlayerState =
+            state;
+
+    },
+    500
+);
+
+
+/* ============================================================
+   NICKNAME
+   ============================================================ */
+
+document.getElementById(
+    "joinButton"
+).addEventListener(
+    "click",
+    function () {
+
+        let value =
+            nicknameInput.value.trim();
+
+
+        if (!value) {
+            value = "Guest";
+        }
+
+
+        nickname =
+            value.slice(
+                0,
+                24
+            );
+
+
+        localStorage.setItem(
+            "watch_together_nickname",
+            nickname
+        );
+
+
+        nicknameModal.classList.add(
+            "hidden"
+        );
+
+
+        connect();
+    }
+);
+
+
+nicknameInput.addEventListener(
+    "keydown",
+    function (event) {
+
+        if (
+            event.key === "Enter"
+        ) {
+
+            event.preventDefault();
+
+            document.getElementById(
+                "joinButton"
+            ).click();
+        }
+    }
+);
+
+
+/* ============================================================
+   START
+   ============================================================ */
 
 function start() {
 
+    /*
+        If someone somehow opens the root,
+        server should redirect to a room.
+
+        This branch is only a fallback.
+    */
+
     if (!roomId) {
-        const newRoom =
+
+        const generated =
             Math.random()
                 .toString(36)
                 .slice(2, 8)
                 .toUpperCase();
 
-        history.replaceState(
-            {},
-            "",
-            "/r/" + newRoom
-        );
 
-        location.reload();
+        location.href =
+            "/r/" +
+            generated;
+
         return;
     }
+
 
     const saved =
         localStorage.getItem(
             "watch_together_nickname"
         );
 
+
     if (saved) {
-        $("nicknameInput").value = saved;
+        nicknameInput.value =
+            saved;
     }
 
-    $("nicknameModal").classList.remove("hidden");
+
+    nicknameModal.classList.remove(
+        "hidden"
+    );
+
+
+    /*
+        If YouTube API has already loaded
+        before our callback was installed,
+        create the player manually.
+    */
+
+    if (
+        window.YT &&
+        window.YT.Player
+    ) {
+
+        createPlayer();
+    }
 }
 
 
-window.onYouTubeIframeAPIReady = createPlayer;
-
 start();
+
 </script>
 
 </body>
+
 </html>
 """
 
 
 # ============================================================
-# ROUTES
+# HTTP
 # ============================================================
 
-@app.get("/", response_class=HTMLResponse)
-async def index() -> HTMLResponse:
-    return HTMLResponse(HTML)
+@app.get("/")
+async def root():
+
+    room_id = generate_room_id()
+
+    async with rooms_lock:
+
+        rooms[room_id] = Room(
+            room_id=room_id
+        )
+
+    return RedirectResponse(
+        url=f"/r/{room_id}",
+        status_code=302,
+    )
 
 
-@app.get("/r/{room_id}", response_class=HTMLResponse)
-async def room_page(room_id: str) -> HTMLResponse:
+@app.get(
+    "/r/{room_id}",
+    response_class=HTMLResponse,
+)
+async def room_page(
+    room_id: str,
+):
+
     room_id = room_id.upper()
 
-    if not re.fullmatch(r"[A-Z0-9]{4,20}", room_id):
+
+    if not re.fullmatch(
+        r"[A-Z0-9]{4,20}",
+        room_id,
+    ):
+
         return HTMLResponse(
-            "<h1>Invalid room</h1>",
+            "<h1>Invalid room ID</h1>",
             status_code=400,
         )
 
-    async with rooms_lock:
-        if room_id not in rooms:
-            rooms[room_id] = Room(room_id=room_id)
 
-    return HTMLResponse(HTML)
+    async with rooms_lock:
+
+        if room_id not in rooms:
+
+            rooms[room_id] = Room(
+                room_id=room_id
+            )
+
+
+    return HTMLResponse(
+        HTML
+    )
 
 
 # ============================================================
 # WEBSOCKET
 # ============================================================
 
-@app.websocket("/ws/{room_id}")
+@app.websocket(
+    "/ws/{room_id}"
+)
 async def websocket_endpoint(
     websocket: WebSocket,
     room_id: str,
 ):
+
     await websocket.accept()
+
 
     room_id = room_id.upper()
 
+
     async with rooms_lock:
-        room = rooms.get(room_id)
+
+        room = rooms.get(
+            room_id
+        )
+
 
         if room is None:
-            room = Room(room_id=room_id)
+
+            room = Room(
+                room_id=room_id
+            )
+
             rooms[room_id] = room
 
-    client_id = create_client_id()
+
+    client_id =
+        generate_client_id()
+
+
     client: Client | None = None
+
 
     try:
 
-        first = await websocket.receive_json()
+        # ====================================================
+        # FIRST MESSAGE MUST BE JOIN
+        # ====================================================
 
-        if first.get("type") != "join":
-            await websocket.send_json({
-                "type": "error",
-                "message": "Join required",
-            })
+        first_message =
+            await websocket.receive_json()
+
+
+        if (
+            first_message.get("type")
+            != "join"
+        ):
+
+            await send_json(
+                websocket,
+                {
+                    "type": "error",
+                    "message":
+                        "Join required",
+                },
+            )
+
             await websocket.close()
+
             return
 
-        nickname = clean_nickname(
-            first.get("nickname", "Guest")
-        )
+
+        nickname =
+            clean_nickname(
+                first_message.get(
+                    "nickname",
+                    "Guest",
+                )
+            )
+
 
         client = Client(
             websocket=websocket,
@@ -1294,220 +2708,454 @@ async def websocket_endpoint(
             nickname=nickname,
         )
 
-        room.clients[client_id] = client
 
-        await websocket.send_json(
-            room_state(room)
+        room.clients[
+            client_id
+        ] = client
+
+
+        # ====================================================
+        # SEND CURRENT ROOM STATE TO NEW CLIENT
+        # ====================================================
+
+        await send_json(
+            websocket,
+            make_full_state(room),
         )
 
-        await broadcast(
-            room,
-            {
-                "type": "participants",
-                "participants": [
-                    {
-                        "id": c.client_id,
-                        "nickname": c.nickname,
-                    }
-                    for c in room.clients.values()
-                ],
-            },
+
+        # ====================================================
+        # UPDATE PARTICIPANTS FOR EVERYONE
+        # ====================================================
+
+        await broadcast_participants(
+            room
         )
+
+
+        # ====================================================
+        # MESSAGE LOOP
+        # ====================================================
 
         while True:
 
-            data = await websocket.receive_json()
+            data =
+                await websocket.receive_json()
 
-            message_type = data.get("type")
 
-            # ------------------------------------------------
+            message_type =
+                data.get("type")
+
+
+            # =================================================
             # REQUEST STATE
-            # ------------------------------------------------
+            # =================================================
 
-            if message_type == "request_state":
+            if (
+                message_type
+                == "request_state"
+            ):
 
-                await websocket.send_json(
-                    room_state(room)
+                await send_json(
+                    websocket,
+                    make_full_state(
+                        room
+                    ),
                 )
 
-            # ------------------------------------------------
+
+            # =================================================
             # SET VIDEO
-            # ------------------------------------------------
+            # =================================================
 
-            elif message_type == "set_video":
+            elif (
+                message_type
+                == "set_video"
+            ):
 
-                video_id = extract_youtube_id(
-                    data.get("video", "")
-                )
+                video_id =
+                    extract_youtube_id(
+                        data.get(
+                            "video",
+                            "",
+                        )
+                    )
+
 
                 if not video_id:
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "Invalid YouTube URL",
-                    })
+
+                    await send_json(
+                        websocket,
+                        {
+                            "type":
+                                "error",
+
+                            "message":
+                                "Invalid YouTube URL",
+                        },
+                    )
+
                     continue
 
-                room.video_id = video_id
-                room.position = 0.0
+
+                # ---------------------------------------------
+                # CHANGE ROOM STATE
+                # ---------------------------------------------
+
+                room.video_id =
+                    video_id
+
                 room.playing = False
-                room.updated_at = time.monotonic()
 
-                await broadcast_state(room)
+                room.position = 0.0
 
-            # ------------------------------------------------
+                room.updated_at =
+                    time.monotonic()
+
+
+                # ---------------------------------------------
+                # SEND NEW VIDEO TO EVERYONE
+                # ---------------------------------------------
+
+                await broadcast(
+                    room,
+                    {
+                        "type":
+                            "video",
+
+                        "video_id":
+                            video_id,
+                    },
+                )
+
+
+            # =================================================
             # PLAY
-            # ------------------------------------------------
+            # =================================================
 
-            elif message_type == "play":
+            elif (
+                message_type
+                == "play"
+            ):
 
                 if not room.video_id:
                     continue
 
-                try:
-                    position = max(
-                        0.0,
-                        float(data.get("position", 0)),
-                    )
-                except (TypeError, ValueError):
-                    position = room.current_position()
 
-                room.position = position
+                try:
+
+                    position =
+                        float(
+                            data.get(
+                                "position",
+                                0,
+                            )
+                        )
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+
+                    position =
+                        room.get_position()
+
+
+                position =
+                    max(
+                        0.0,
+                        position,
+                    )
+
+
+                room.position =
+                    position
+
                 room.playing = True
-                room.updated_at = time.monotonic()
+
+                room.updated_at =
+                    time.monotonic()
+
 
                 await broadcast(
                     room,
                     {
-                        "type": "state",
-                        "room": room.room_id,
-                        "video_id": room.video_id,
-                        "playing": True,
-                        "position": round(position, 3),
-                        "participants": [
-                            {
-                                "id": c.client_id,
-                                "nickname": c.nickname,
-                            }
-                            for c in room.clients.values()
-                        ],
-                        "chat": room.chat[-100:],
+                        "type":
+                            "play",
+
+                        "position":
+                            round(
+                                position,
+                                3,
+                            ),
                     },
                     exclude=client_id,
                 )
 
-            # ------------------------------------------------
-            # PAUSE
-            # ------------------------------------------------
 
-            elif message_type == "pause":
+            # =================================================
+            # PAUSE
+            # =================================================
+
+            elif (
+                message_type
+                == "pause"
+            ):
+
+                if not room.video_id:
+                    continue
+
 
                 try:
-                    position = max(
-                        0.0,
-                        float(data.get("position", 0)),
-                    )
-                except (TypeError, ValueError):
-                    position = room.current_position()
 
-                room.position = position
+                    position =
+                        float(
+                            data.get(
+                                "position",
+                                0,
+                            )
+                        )
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+
+                    position =
+                        room.get_position()
+
+
+                position =
+                    max(
+                        0.0,
+                        position,
+                    )
+
+
+                room.position =
+                    position
+
                 room.playing = False
-                room.updated_at = time.monotonic()
+
+                room.updated_at =
+                    time.monotonic()
+
 
                 await broadcast(
                     room,
                     {
-                        "type": "state",
-                        "room": room.room_id,
-                        "video_id": room.video_id,
-                        "playing": False,
-                        "position": round(position, 3),
-                        "participants": [
-                            {
-                                "id": c.client_id,
-                                "nickname": c.nickname,
-                            }
-                            for c in room.clients.values()
-                        ],
-                        "chat": room.chat[-100:],
+                        "type":
+                            "pause",
+
+                        "position":
+                            round(
+                                position,
+                                3,
+                            ),
                     },
                     exclude=client_id,
                 )
 
-            # ------------------------------------------------
+
+            # =================================================
+            # SEEK
+            # =================================================
+
+            elif (
+                message_type
+                == "seek"
+            ):
+
+                if not room.video_id:
+                    continue
+
+
+                try:
+
+                    position =
+                        float(
+                            data.get(
+                                "position",
+                                0,
+                            )
+                        )
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+
+                    continue
+
+
+                position =
+                    max(
+                        0.0,
+                        position,
+                    )
+
+
+                room.position =
+                    position
+
+                room.updated_at =
+                    time.monotonic()
+
+
+                await broadcast(
+                    room,
+                    {
+                        "type":
+                            "seek",
+
+                        "position":
+                            round(
+                                position,
+                                3,
+                            ),
+                    },
+                    exclude=client_id,
+                )
+
+
+            # =================================================
             # CHAT
-            # ------------------------------------------------
+            # =================================================
 
-            elif message_type == "chat":
+            elif (
+                message_type
+                == "chat"
+            ):
 
-                text = str(data.get("text", "")).strip()
+                text =
+                    str(
+                        data.get(
+                            "text",
+                            "",
+                        )
+                    ).strip()
+
 
                 if not text:
                     continue
 
-                text = text[:500]
 
-                chat_message = {
-                    "id": secrets.token_hex(8),
-                    "nickname": nickname,
-                    "text": text,
-                    "time": int(time.time()),
+                text =
+                    text[:500]
+
+
+                message = {
+                    "id":
+                        secrets.token_hex(8),
+
+                    "nickname":
+                        nickname,
+
+                    "text":
+                        text,
+
+                    "time":
+                        int(
+                            time.time()
+                        ),
                 }
 
-                room.chat.append(chat_message)
+
+                room.chat.append(
+                    message
+                )
+
 
                 if len(room.chat) > 100:
-                    room.chat = room.chat[-100:]
+
+                    room.chat =
+                        room.chat[-100:]
+
 
                 await broadcast(
                     room,
                     {
-                        "type": "chat",
-                        "message": chat_message,
+                        "type":
+                            "chat",
+
+                        "message":
+                            message,
                     },
                 )
 
+
     except WebSocketDisconnect:
+
         pass
 
-    except Exception:
-        pass
+
+    except Exception as error:
+
+        print(
+            "WebSocket error:",
+            repr(error),
+        )
+
 
     finally:
 
-        if client_id in room.clients:
-            room.clients.pop(client_id, None)
+        # ====================================================
+        # REMOVE CLIENT
+        # ====================================================
+
+        room.clients.pop(
+            client_id,
+            None,
+        )
+
+
+        # ====================================================
+        # UPDATE PARTICIPANTS
+        # ====================================================
 
         try:
-            await broadcast(
-                room,
-                {
-                    "type": "participants",
-                    "participants": [
-                        {
-                            "id": c.client_id,
-                            "nickname": c.nickname,
-                        }
-                        for c in room.clients.values()
-                    ],
-                },
+
+            await broadcast_participants(
+                room
             )
+
         except Exception:
+
             pass
 
-        # Удаляем пустые комнаты.
+
+        # ====================================================
+        # REMOVE EMPTY ROOM
+        # ====================================================
+
         if not room.clients:
+
             async with rooms_lock:
-                if room_id in rooms and not rooms[room_id].clients:
-                    rooms.pop(room_id, None)
+
+                if (
+                    room_id in rooms
+                    and
+                    not rooms[
+                        room_id
+                    ].clients
+                ):
+
+                    rooms.pop(
+                        room_id,
+                        None,
+                    )
 
 
 # ============================================================
-# HEALTH CHECK
+# HEALTH
 # ============================================================
 
 @app.get("/health")
 async def health():
+
     return {
         "status": "ok",
         "rooms": len(rooms),
+        "service":
+            "watch-together",
     }

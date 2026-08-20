@@ -955,7 +955,10 @@ async def list_polls(room_id: str, request: Request) -> dict[str, Any]:
 
 @app.post("/api/rooms/{room_id}/polls")
 async def create_poll(room_id: str, request: Request) -> dict[str, Any]:
-    user, _ = await require_room_manager(request, room_id.upper())
+    user = await require_user(request)
+    permission = await room_permission(room_id.upper(), int(user["id"]))
+    if permission.get("role") not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="Создавать голосования могут только владелец и администраторы.")
     body = await request.json()
     question = " ".join(str(body.get("question") or "").split()).strip()[:500]
     options = [
@@ -1138,7 +1141,7 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
                 await broadcast_participants(room)
 
             elif message_type == "set_video":
-                if room.owner_id and not permission.get("can_control"):
+                if room.owner_id and permission.get("role") not in {"owner", "admin"}:
                     await send_json(
                         websocket,
                         {"type": "error", "message": "Менять видео могут только владелец и админы."},
@@ -1175,7 +1178,7 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
                 )
 
             elif message_type in {"play", "pause"}:
-                if room.owner_id and not permission.get("can_control"):
+                if room.owner_id and permission.get("role") not in {"owner", "admin"}:
                     await send_json(
                         websocket,
                         {"type": "error", "message": "Управлять видео могут только владелец и админы."},
@@ -1212,7 +1215,7 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
                 )
 
             elif message_type == "seek":
-                if room.owner_id and not permission.get("can_control"):
+                if room.owner_id and permission.get("role") not in {"owner", "admin"}:
                     await send_json(
                         websocket,
                         {"type": "error", "message": "Перематывать могут только владелец и админы."},
@@ -1235,7 +1238,7 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
                 )
 
             elif message_type == "sync":
-                if room.owner_id and not permission.get("can_control"):
+                if room.owner_id and permission.get("role") not in {"owner", "admin"}:
                     await send_json(websocket, room.state_payload("sync"))
                     continue
                 if "position" not in message:
@@ -1804,7 +1807,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
       display: block;
       align-items: stretch;
       min-height: min(680px, calc(100dvh - 172px));
-      overflow: hidden;
+       overflow: visible;
       border: 1px solid var(--line);
       border-radius: 10px;
       background: #08090b;
@@ -1821,8 +1824,8 @@ PAGE_TEMPLATE = r"""<!doctype html>
       transition: width .28s ease, transform .28s ease;
     }
     .room-layout.chat-open .video-stage {
-      width: calc(100% - min(380px, 34vw) + 34px);
-      transform: translateX(-10px);
+       width: 100%;
+       transform: none;
     }
     #youtube-player,
     #youtube-player iframe {
@@ -1830,6 +1833,10 @@ PAGE_TEMPLATE = r"""<!doctype html>
       height: 100%;
       display: block;
     }
+     #youtube-player.viewer-mode,
+     #youtube-player.viewer-mode iframe {
+       pointer-events: none;
+     }
     .video-placeholder {
       position: absolute;
       inset: 0;
@@ -1888,26 +1895,25 @@ PAGE_TEMPLATE = r"""<!doctype html>
     }
     .stage-button:hover { background: rgba(37, 41, 47, .92); }
     .chat-panel {
-      position: absolute;
-      top: 0;
-      right: 0;
-      bottom: 0;
-      width: min(380px, 34vw);
+       position: relative;
+       width: 100%;
+       height: 360px;
       min-width: 0;
       min-height: 0;
       display: flex;
       flex-direction: column;
-      border-left: 1px solid var(--line);
+       border: 0;
+       border-top: 1px solid var(--line);
       background: rgba(18, 20, 24, .96);
       box-shadow: -14px 0 40px rgba(0, 0, 0, .25);
-      z-index: 5;
-      transform: translateX(100%);
-      pointer-events: none;
-      transition: transform .28s ease;
+       z-index: 5;
+       transform: none;
+       pointer-events: auto;
+       transition: none;
+       display: none;
     }
     .chat-panel.is-open {
-      transform: translateX(0);
-      pointer-events: auto;
+       display: flex;
     }
     .chat-header {
       min-height: 58px;
@@ -2129,17 +2135,18 @@ PAGE_TEMPLATE = r"""<!doctype html>
       width: calc(100% - min(420px, 34vw) + 42px);
     }
     .room-layout:fullscreen .chat-panel {
+       position: absolute;
       top: 0;
       right: 0;
       bottom: 0;
       width: min(420px, 34vw);
-      border-left: 1px solid rgba(255,255,255,.14);
+       height: auto;
+       border: 0;
+       border-left: 1px solid rgba(255,255,255,.14);
       box-shadow: -12px 0 40px rgba(0,0,0,.3);
     }
     @media (max-width: 940px) {
-      .room-layout.chat-open .video-stage {
-        width: calc(100% - min(340px, 36vw) + 28px);
-      }
+       .room-layout.chat-open .video-stage { width: 100%; }
     }
     @media (max-width: 720px) {
       .topbar { min-height: 56px; padding: 10px 14px; }
@@ -2163,9 +2170,10 @@ PAGE_TEMPLATE = r"""<!doctype html>
         transform: none !important;
       }
       .chat-panel {
-        right: 0;
-        bottom: 0;
-        left: 0;
+        position: relative;
+        right: auto;
+        bottom: auto;
+        left: auto;
         top: auto;
         width: auto;
         height: min(43%, 360px);
@@ -2174,13 +2182,13 @@ PAGE_TEMPLATE = r"""<!doctype html>
         border-left: 0;
         background: rgba(18, 20, 24, .95);
         box-shadow: 0 -12px 35px rgba(0,0,0,.28);
-        transform: translateY(100%);
-        transition: transform .22s ease;
+        transform: none;
+        transition: none;
       }
-      .chat-panel.is-open { transform: translateY(0); }
       .chat-header { min-height: 48px; padding: 0 12px; }
       .stage-controls { opacity: 1; transform: none; right: 10px; bottom: 10px; }
       .room-layout:fullscreen .chat-panel {
+        position: absolute;
         top: auto;
         right: 0;
         bottom: 0;
@@ -2191,7 +2199,6 @@ PAGE_TEMPLATE = r"""<!doctype html>
         border-left: 0;
         box-shadow: 0 -12px 35px rgba(0,0,0,.28);
       }
-      .room-layout:fullscreen .chat-panel.is-open { transform: translateY(0); }
       .chat-close { height: 28px; padding: 0 8px; }
       .nickname-form { flex-direction: column; }
       .nickname-form .button { width: 100%; }
@@ -2406,15 +2413,15 @@ PAGE_TEMPLATE = r"""<!doctype html>
       }
 
       function applyPermissions() {
-        const canControl = Boolean(currentPermission.can_control);
+        const canControl = ["owner", "admin"].includes(currentPermission.role);
         const canManage = Boolean(
-          currentPermission.can_manage_users ||
-          currentPermission.can_manage_admins ||
-          currentPermission.role === "owner" ||
-          currentPermission.role === "admin"
+          ["owner", "admin"].includes(currentPermission.role)
         );
         videoForm.classList.toggle("hidden", !canControl);
         viewerShield.classList.toggle("hidden", canControl);
+        document.getElementById("youtube-player").classList.toggle(
+          "viewer-mode", !canControl
+        );
         managementPanel.classList.toggle("hidden", !canManage);
       }
 
@@ -2852,7 +2859,9 @@ PAGE_TEMPLATE = r"""<!doctype html>
               const state = event.data;
               if (state === YT.PlayerState.BUFFERING) {
                 lastPlayerState = state;
-                recoveringUntil = Date.now() + 7000;
+                // Buffering is a local playback problem, never a room-wide pause.
+                // Keep the guard long enough to cover slow/mobile connections.
+                recoveringUntil = Date.now() + 30000;
                 return;
               }
               if (state === YT.PlayerState.PLAYING) {
@@ -2861,7 +2870,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
                 if (remotePlayback && remotePlayback.expires >= Date.now() &&
                     remotePlayback.playing) {
                   remotePlayback = null;
-                } else if (currentPermission.can_control) {
+                } else if (["owner", "admin"].includes(currentPermission.role)) {
                   send("play", { position: currentTime() });
                 }
               } else if (state === YT.PlayerState.PAUSED) {
@@ -2871,13 +2880,14 @@ PAGE_TEMPLATE = r"""<!doctype html>
                 if (remotePlayback && remotePlayback.expires >= Date.now() &&
                     !remotePlayback.playing) {
                   remotePlayback = null;
-                } else if (!recovering && currentPermission.can_control &&
+                } else if (!recovering &&
+                    ["owner", "admin"].includes(currentPermission.role) &&
                     Date.now() >= remoteSeekUntil) {
                   send("pause", { position: currentTime() });
                 }
               } else if (state === YT.PlayerState.ENDED) {
                 lastPlayerState = state;
-                if (currentPermission.can_control) {
+                if (["owner", "admin"].includes(currentPermission.role)) {
                   send("pause", { position: Number(player.getDuration()) || currentTime() });
                 }
               } else {
@@ -2893,7 +2903,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
 
       window.setInterval(() => {
         if (socketIsOpen() && playerReady && player && currentVideoId &&
-            currentPermission.can_control) {
+            ["owner", "admin"].includes(currentPermission.role)) {
           const state = player.getPlayerState();
           if (state === YT.PlayerState.BUFFERING ||
               Date.now() < recoveringUntil) return;

@@ -720,9 +720,9 @@ async def list_rooms(request: Request) -> dict[str, Any]:
                (SELECT COUNT(*) FROM wt_room_members m WHERE m.room_id = r.room_id) AS members
         FROM wt_rooms r
         JOIN wt_users u ON u.id = r.owner_id
-        WHERE r.mode = 'open'
-          AND (
-            %s = '%%'
+         WHERE r.mode = 'open'
+           AND (
+             %s
             OR LOWER(r.name) LIKE %s
             OR LOWER(COALESCE(r.description, '')) LIKE %s
             OR LOWER(COALESCE(r.video_id, '')) LIKE %s
@@ -730,7 +730,7 @@ async def list_rooms(request: Request) -> dict[str, Any]:
         ORDER BY r.created_at DESC
         LIMIT 100
         """,
-        (pattern == "%%", pattern, pattern, pattern),
+         (not query, pattern, pattern, pattern),
     )
     return {"rooms": rooms_list, "query": query}
 
@@ -815,6 +815,7 @@ async def room_details(room_id: str, request: Request) -> dict[str, Any]:
     permission = await room_permission(room_id, int(user["id"]) if user else None)
     room["permission"] = permission
     room["is_owner"] = bool(user and room["owner_id"] == user["id"])
+    room["user_login"] = user["login"] if user else None
     room.pop("owner_id", None)
     return room
 
@@ -928,21 +929,26 @@ async def manage_member(room_id: str, request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/rooms/{room_id}/polls")
-async def list_polls(room_id: str) -> dict[str, Any]:
+async def list_polls(room_id: str, request: Request) -> dict[str, Any]:
+    user = await current_user(request)
+    user_id = int(user["id"]) if user else None
     polls = await db_fetchall(
         """
         SELECT p.id, p.question, p.options, p.is_active, p.is_pinned,
                p.created_at, u.login AS creator_login,
-               COUNT(v.user_id)::INTEGER AS votes
+               COUNT(v.user_id)::INTEGER AS votes,
+               my_vote.option_index AS selected_option
         FROM wt_polls p
         JOIN wt_users u ON u.id = p.created_by
         LEFT JOIN wt_poll_votes v ON v.poll_id = p.id
+        LEFT JOIN wt_poll_votes my_vote
+          ON my_vote.poll_id = p.id AND my_vote.user_id = %s
         WHERE p.room_id = %s
-        GROUP BY p.id, u.login
+        GROUP BY p.id, u.login, my_vote.option_index
         ORDER BY p.id DESC
         LIMIT 20
         """,
-        (room_id.upper(),),
+        (user_id, room_id.upper()),
     )
     return {"polls": polls}
 
@@ -1155,7 +1161,7 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
                     continue
 
                 room.video_id = video_id
-                room.save_timing(position=0.0, playing=False)
+                room.save_timing(position=0.0, playing=True)
                 await persist_room_timing(room)
                 await broadcast(
                     room,
@@ -1164,7 +1170,7 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
                         "video_id": video_id,
                         "video": video_id,
                         "position": 0.0,
-                        "playing": False,
+                        "playing": True,
                     },
                 )
 
@@ -1836,6 +1842,14 @@ PAGE_TEMPLATE = r"""<!doctype html>
       pointer-events: none;
     }
     .video-placeholder.hidden { display: none; }
+    .viewer-shield {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      background: transparent;
+      cursor: default;
+    }
+    .viewer-shield.hidden { display: none; }
     .placeholder-inner { max-width: 360px; }
     .placeholder-title {
       margin: 0 0 8px;
@@ -1946,6 +1960,39 @@ PAGE_TEMPLATE = r"""<!doctype html>
       scrollbar-color: #414751 transparent;
       scrollbar-width: thin;
     }
+    .chat-polls {
+      display: grid;
+      gap: 8px;
+      padding: 0 11px 11px;
+      border-top: 1px solid var(--line);
+      background: #15171b;
+    }
+    .chat-polls:empty { display: none; }
+    .chat-poll {
+      display: grid;
+      gap: 7px;
+      padding: 11px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--surface-raised);
+    }
+    .chat-poll-question { font-size: 12px; font-weight: 750; line-height: 1.35; }
+    .chat-poll-options { display: grid; gap: 4px; }
+    .chat-poll-option {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 28px;
+      color: var(--text);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .chat-poll-option input { accent-color: #b8c2cf; }
+    .chat-poll-vote {
+      justify-self: start;
+      min-height: 28px;
+      padding: 0 9px;
+    }
     .chat-empty {
       padding: 20px 6px;
       color: #727a87;
@@ -1995,15 +2042,26 @@ PAGE_TEMPLATE = r"""<!doctype html>
     .connection.connected .connection-dot { background: #a9b7a7; }
     .connection.error .connection-dot { background: var(--danger); }
     .management-panel {
-      padding: 14px;
+      padding: 16px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--surface);
     }
-    .management-panel summary { cursor: pointer; color: var(--text); font-size: 13px; font-weight: 700; }
-    .management-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 13px; }
+    .management-panel summary {
+      cursor: pointer;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 750;
+      list-style-position: inside;
+    }
+    .management-panel[open] summary { margin-bottom: 15px; }
+    .management-grid { display: grid; grid-template-columns: minmax(220px, .85fr) minmax(320px, 1.15fr); gap: 18px; }
     .management-section { display: grid; gap: 8px; }
     .management-title { margin: 0; color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+    #poll-form { display: grid; gap: 8px; }
+    #poll-form .input { min-height: 40px; }
+    #poll-form textarea { min-height: 106px; padding: 10px 13px; resize: vertical; }
+    #poll-list { display: grid; gap: 8px; margin-top: 6px; }
     .member-row, .poll-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-raised); font-size: 12px; }
     .member-actions { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }
     .mini-button { min-height: 28px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--text); background: var(--surface-soft); font-size: 11px; }
@@ -2163,7 +2221,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
 
     <main class="app-main">
       <div class="toolbar">
-        <form class="video-form" id="video-form">
+      <form class="video-form hidden" id="video-form">
           <input class="input" id="video-input" type="text"
                  placeholder="Paste a YouTube link or video ID" autocomplete="off">
           <button class="button" type="submit">Load video</button>
@@ -2178,6 +2236,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
       <section class="room-layout chat-open" id="room-layout" aria-label="Watch Together room">
         <div class="video-stage" id="video-stage">
           <div id="youtube-player"></div>
+          <div class="viewer-shield" id="viewer-shield" aria-hidden="true"></div>
           <div class="video-placeholder" id="video-placeholder">
             <div class="placeholder-inner">
               <h1 class="placeholder-title">Drop in a video to start</h1>
@@ -2202,6 +2261,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
           <div class="chat-messages" id="chat-messages" aria-live="polite">
             <div class="chat-empty" id="chat-empty">No messages yet. Say hello when everyone is ready.</div>
           </div>
+          <div class="chat-polls" id="chat-polls" aria-label="Опросы"></div>
           <form class="chat-composer" id="chat-form">
             <input class="input" id="chat-input" type="text" maxlength="500"
                    placeholder="Write a message..." autocomplete="off">
@@ -2214,8 +2274,8 @@ PAGE_TEMPLATE = r"""<!doctype html>
         <span class="connection-dot"></span>
         <span id="connection-label">Enter a nickname to join</span>
       </div>
-      <details class="management-panel hidden" id="management-panel">
-        <summary>Участники и голосования</summary>
+      <details class="management-panel hidden" id="management-panel" open>
+        <summary>Управление комнатой</summary>
         <div class="management-grid">
           <section class="management-section">
             <h3 class="management-title">Сейчас смотрят</h3>
@@ -2261,6 +2321,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
       const connectionLabel = document.getElementById("connection-label");
       const videoForm = document.getElementById("video-form");
       const videoInput = document.getElementById("video-input");
+      const viewerShield = document.getElementById("viewer-shield");
       const videoPlaceholder = document.getElementById("video-placeholder");
       const chatPanel = document.getElementById("chat-panel");
       const chatToggle = document.getElementById("chat-toggle");
@@ -2270,6 +2331,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
       const stageFullscreen = document.getElementById("stage-fullscreen");
       const roomLayout = document.getElementById("room-layout");
       const chatMessages = document.getElementById("chat-messages");
+      const chatPolls = document.getElementById("chat-polls");
       const chatEmpty = document.getElementById("chat-empty");
       const chatForm = document.getElementById("chat-form");
       const chatInput = document.getElementById("chat-input");
@@ -2297,12 +2359,20 @@ PAGE_TEMPLATE = r"""<!doctype html>
       let roomAccessReady = true;
       let currentPermission = {};
       let currentParticipants = [];
+      let lastPlayerState = -1;
+      let recoveringUntil = 0;
 
       fetch(`/api/rooms/${roomId}`)
         .then((response) => response.ok ? response.json() : null)
         .then(async (room) => {
           if (!room) return;
           if (room.is_owner) ownerDelete.hidden = false;
+          currentPermission = room.permission || {};
+          applyPermissions();
+          if (room.user_login) {
+            nickname = room.user_login;
+            nicknameBackdrop.classList.add("hidden");
+          }
           if (room.mode === "private" && !room.is_owner) {
             roomAccessReady = false;
             let password = window.prompt("Введите пароль приватной комнаты:");
@@ -2319,12 +2389,13 @@ PAGE_TEMPLATE = r"""<!doctype html>
               const result = await response.json().catch(() => ({}));
               if (!response.ok) throw result;
               roomAccessReady = true;
-              if (nickname) connect();
             } catch (error) {
               setConnection("error", error.detail || "Неверный пароль комнаты");
               showToast(error.detail || "Неверный пароль комнаты");
+              return;
             }
           }
+          if (nickname && roomAccessReady) connect();
         })
         .catch(() => {});
 
@@ -2332,6 +2403,19 @@ PAGE_TEMPLATE = r"""<!doctype html>
         connection.classList.toggle("connected", status === "connected");
         connection.classList.toggle("error", status === "error");
         connectionLabel.textContent = text;
+      }
+
+      function applyPermissions() {
+        const canControl = Boolean(currentPermission.can_control);
+        const canManage = Boolean(
+          currentPermission.can_manage_users ||
+          currentPermission.can_manage_admins ||
+          currentPermission.role === "owner" ||
+          currentPermission.role === "admin"
+        );
+        videoForm.classList.toggle("hidden", !canControl);
+        viewerShield.classList.toggle("hidden", canControl);
+        managementPanel.classList.toggle("hidden", !canManage);
       }
 
       function showToast(text) {
@@ -2490,27 +2574,31 @@ PAGE_TEMPLATE = r"""<!doctype html>
         }
       }
 
-      async function loadPolls() {
-        const response = await fetch(`/api/rooms/${roomId}/polls`);
-        if (!response.ok) return;
-        const result = await response.json();
-        pollList.replaceChildren();
-        (result.polls || []).forEach((poll) => {
+      function renderPolls(container, polls, management = false) {
+        container.replaceChildren();
+        (polls || []).forEach((poll) => {
           const row = document.createElement("div");
-          row.className = "poll-row";
+          row.className = management ? "poll-row" : "chat-poll";
           const form = document.createElement("form");
-          form.className = "poll-options";
-          const title = document.createElement("strong");
+          form.className = management ? "poll-options" : "chat-poll-options";
+          const title = document.createElement(management ? "strong" : "div");
+          title.className = management ? "" : "chat-poll-question";
           title.textContent = poll.question;
           form.appendChild(title);
-          poll.options.forEach((option, index) => {
+          (poll.options || []).forEach((option, index) => {
             const label = document.createElement("label");
-            label.className = "poll-option";
-            label.innerHTML = `<input type="radio" name="poll-${poll.id}" value="${index}"> ${option}`;
+            label.className = management ? "poll-option" : "chat-poll-option";
+            const input = document.createElement("input");
+            input.type = "radio";
+            input.name = `poll-${poll.id}-${management ? "admin" : "chat"}`;
+            input.value = String(index);
+            input.checked = poll.selected_option != null &&
+              Number(poll.selected_option) === index;
+            label.append(input, document.createTextNode(option));
             form.appendChild(label);
           });
           const vote = document.createElement("button");
-          vote.className = "mini-button";
+          vote.className = management ? "mini-button" : "button chat-poll-vote";
           vote.type = "submit";
           vote.textContent = "Проголосовать";
           form.appendChild(vote);
@@ -2523,11 +2611,11 @@ PAGE_TEMPLATE = r"""<!doctype html>
               headers: {"Content-Type":"application/json"},
               body: JSON.stringify({option_index: Number(selected.value)})
             });
-            showToast(response.ok ? "Голос принят" : "Голос уже нельзя изменить");
+            showToast(response.ok ? "Голос принят" : "Войдите, чтобы голосовать");
             if (response.ok) loadPolls();
           });
           row.appendChild(form);
-          if (currentPermission.can_manage_users) {
+          if (management && currentPermission.can_manage_users) {
             const toggle = document.createElement("button");
             toggle.className = "mini-button";
             toggle.type = "button";
@@ -2542,8 +2630,20 @@ PAGE_TEMPLATE = r"""<!doctype html>
             });
             row.appendChild(toggle);
           }
-          pollList.appendChild(row);
+          container.appendChild(row);
         });
+      }
+
+      async function loadPolls() {
+        const response = await fetch(`/api/rooms/${roomId}/polls`);
+        if (!response.ok) return;
+        const result = await response.json();
+        renderPolls(chatPolls, result.polls, false);
+        if (!managementPanel.classList.contains("hidden")) {
+          renderPolls(pollList, result.polls, true);
+        } else {
+          pollList.replaceChildren();
+        }
       }
 
       function clearChat() {
@@ -2636,7 +2736,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
         const state = player.getPlayerState();
         const currentTime = Number(player.getCurrentTime()) || 0;
         if (Math.abs(currentTime - nextState.position) > 1.5) {
-          remoteSeekUntil = Date.now() + 1200;
+          remoteSeekUntil = Date.now() + 1800;
           player.seekTo(nextState.position, true);
         }
         if (nextState.playing && state !== YT.PlayerState.PLAYING) {
@@ -2667,10 +2767,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
         switch (message.type) {
           case "state":
             currentPermission = message.permission || {};
-            managementPanel.classList.toggle(
-              "hidden",
-              !currentPermission.can_manage_users
-            );
+            applyPermissions();
             updateParticipants(message.participants);
             renderChat(message.chat);
             loadPolls();
@@ -2753,22 +2850,38 @@ PAGE_TEMPLATE = r"""<!doctype html>
             },
             onStateChange: (event) => {
               const state = event.data;
+              if (state === YT.PlayerState.BUFFERING) {
+                lastPlayerState = state;
+                recoveringUntil = Date.now() + 7000;
+                return;
+              }
               if (state === YT.PlayerState.PLAYING) {
+                lastPlayerState = state;
+                recoveringUntil = 0;
                 if (remotePlayback && remotePlayback.expires >= Date.now() &&
                     remotePlayback.playing) {
                   remotePlayback = null;
-                } else {
+                } else if (currentPermission.can_control) {
                   send("play", { position: currentTime() });
                 }
               } else if (state === YT.PlayerState.PAUSED) {
+                const recovering = Date.now() < recoveringUntil ||
+                  lastPlayerState === YT.PlayerState.BUFFERING;
+                lastPlayerState = state;
                 if (remotePlayback && remotePlayback.expires >= Date.now() &&
                     !remotePlayback.playing) {
                   remotePlayback = null;
-                } else if (Date.now() >= remoteSeekUntil) {
+                } else if (!recovering && currentPermission.can_control &&
+                    Date.now() >= remoteSeekUntil) {
                   send("pause", { position: currentTime() });
                 }
               } else if (state === YT.PlayerState.ENDED) {
-                send("pause", { position: Number(player.getDuration()) || currentTime() });
+                lastPlayerState = state;
+                if (currentPermission.can_control) {
+                  send("pause", { position: Number(player.getDuration()) || currentTime() });
+                }
+              } else {
+                lastPlayerState = state;
               }
             },
             onError: () => showToast("YouTube could not load this video.")
@@ -2779,14 +2892,18 @@ PAGE_TEMPLATE = r"""<!doctype html>
       window.onYouTubeIframeAPIReady = setupPlayer;
 
       window.setInterval(() => {
-        if (socketIsOpen() && playerReady && player && currentVideoId) {
+        if (socketIsOpen() && playerReady && player && currentVideoId &&
+            currentPermission.can_control) {
           const state = player.getPlayerState();
+          if (state === YT.PlayerState.BUFFERING ||
+              Date.now() < recoveringUntil) return;
           send("sync", {
             position: currentTime(),
             playing: state === YT.PlayerState.PLAYING
           });
         }
       }, 2200);
+      window.setInterval(loadPolls, 5000);
 
       nicknameForm.addEventListener("submit", (event) => {
         event.preventDefault();

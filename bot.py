@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
@@ -659,7 +660,7 @@ async def register(request: Request) -> JSONResponse:
         )
     except Exception:
         raise HTTPException(status_code=409, detail="Такой логин уже занят.")
-    response = JSONResponse({"ok": True, "user": user})
+    response = JSONResponse(jsonable_encoder({"ok": True, "user": user}))
     response.set_cookie(
         SESSION_COOKIE,
         make_session(int(user["id"])),
@@ -683,7 +684,7 @@ async def login(request: Request) -> JSONResponse:
     if not user or not password_matches(password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Неверный логин или пароль.")
     user.pop("password_hash", None)
-    response = JSONResponse({"ok": True, "user": user})
+    response = JSONResponse(jsonable_encoder({"ok": True, "user": user}))
     response.set_cookie(
         SESSION_COOKIE,
         make_session(int(user["id"])),

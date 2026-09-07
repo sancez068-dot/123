@@ -1123,9 +1123,17 @@ async def update_poll(poll_id: int, request: Request) -> dict[str, Any]:
     return {"ok": True}  
   
   
-@app.get("/health")  
-async def health() -> dict[str, str]:  
-    return {"status": "ok"}  
+@app.get("/health")
+async def health() -> dict[str, str]:
+    if db_pool is None:
+        return {"status": "ok", "database": "not_configured"}
+    try:
+        async with db_pool.connection() as conn:
+            await conn.execute("SELECT 1")
+        return {"status": "ok", "database": "connected"}
+    except Exception:
+        return {"status": "ok", "database": "error"}
+
   
   
 @app.websocket("/ws/{room_id}")  

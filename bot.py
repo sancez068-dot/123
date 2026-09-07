@@ -298,26 +298,40 @@ async def close_database() -> None:
         await db_pool.close()  
   
   
-async def current_user(request: Request) -> dict[str, Any] | None:  
-    user_id = session_user_id(request.cookies.get(SESSION_COOKIE))  
-    if user_id is None:  
-        return None  
-    return await db_fetchone(  
-        "SELECT id, login, created_at FROM wt_users WHERE id = %s",  
-        (user_id,),  
-    )  
-  
-  
-async def websocket_user(websocket: WebSocket) -> dict[str, Any] | None:  
-    user_id = session_user_id(websocket.cookies.get(SESSION_COOKIE))  
-    if user_id is None:  
-        return None  
-    return await db_fetchone(  
-        "SELECT id, login, created_at FROM wt_users WHERE id = %s",  
-        (user_id,),  
-    )  
-  
-  
+def bearer_session_token(request: Request) -> str:
+    value = str(request.headers.get("Authorization") or "").strip()
+    return value[7:].strip() if value.lower().startswith("bearer ") else ""
+
+
+async def current_user(request: Request) -> dict[str, Any] | None:
+    session = request.cookies.get(SESSION_COOKIE) or bearer_session_token(request)
+    user_id = session_user_id(session)
+    if user_id is None:
+        return None
+    return await db_fetchone(
+        "SELECT id, login, created_at FROM wt_users WHERE id = %s",
+        (user_id,),
+    )
+
+
+def websocket_session_token(websocket: WebSocket) -> str:
+    auth = str(websocket.headers.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return str(websocket.query_params.get("token") or "").strip()
+
+
+async def websocket_user(websocket: WebSocket) -> dict[str, Any] | None:
+    session = websocket.cookies.get(SESSION_COOKIE) or websocket_session_token(websocket)
+    user_id = session_user_id(session)
+    if user_id is None:
+        return None
+    return await db_fetchone(
+        "SELECT id, login, created_at FROM wt_users WHERE id = %s",
+        (user_id,),
+    )
+
+
 async def room_is_accessible(  
     room_id: str, user_id: int | None, access_token: str | None  
 ) -> bool:  
@@ -671,10 +685,11 @@ async def register(request: Request) -> JSONResponse:
         )  
     except Exception:  
         raise HTTPException(status_code=409, detail="Такой логин уже занят.")  
-    response = JSONResponse(jsonable_encoder({"ok": True, "user": user}))  
+    session_token = make_session(int(user["id"]))
+    response = JSONResponse(jsonable_encoder({"ok": True, "user": user, "session_token": session_token}))  
     response.set_cookie(  
         SESSION_COOKIE,  
-        make_session(int(user["id"])),  
+        session_token,  
         max_age=SESSION_MAX_AGE,  
         httponly=True,  
         samesite="lax",  
@@ -695,10 +710,11 @@ async def login(request: Request) -> JSONResponse:
     if not user or not password_matches(password, user["password_hash"]):  
         raise HTTPException(status_code=401, detail="Неверный логин или пароль.")  
     user.pop("password_hash", None)  
-    response = JSONResponse(jsonable_encoder({"ok": True, "user": user}))  
+    session_token = make_session(int(user["id"]))
+    response = JSONResponse(jsonable_encoder({"ok": True, "user": user, "session_token": session_token}))  
     response.set_cookie(  
         SESSION_COOKIE,  
-        make_session(int(user["id"])),  
+        session_token,  
         max_age=SESSION_MAX_AGE,  
         httponly=True,  
         samesite="lax",  
@@ -1129,7 +1145,8 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
     if not await room_is_accessible(  
         room_id,  
         connected_user_id,  
-        websocket.cookies.get(f"wt_room_access_{room_id}"),  
+        websocket.cookies.get(f"wt_room_access_{room_id}")
+        or websocket.query_params.get("access_token"),  
     ):  
         await send_json(  
             websocket,  

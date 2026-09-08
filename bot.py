@@ -621,16 +621,33 @@ async def broadcast(
         room.nicknames.pop(client_id, None)  
   
   
-async def broadcast_participants(room: Room) -> None:  
-    await broadcast(  
-        room,  
-        {  
-            "type": "participants",  
-            "participants": room.participants(),  
-        },  
-    )  
-  
-  
+async def participants_payload(room: Room) -> list[dict[str, Any]]:
+    ids = sorted({int(uid) for uid in room.client_users.values() if uid is not None})
+    members: dict[int, dict[str, Any]] = {}
+    if ids:
+        placeholders = ",".join(["%s"] * len(ids))
+        rows = await db_fetchall(
+            f"SELECT user_id, role, can_control, can_manage_users, can_manage_admins, is_muted, is_banned FROM wt_room_members WHERE room_id = %s AND user_id IN ({placeholders})",
+            (room.room_id, *ids),
+        )
+        members = {int(row["user_id"]): row for row in rows}
+    result = []
+    for client_id in room.clients:
+        uid = room.client_users.get(client_id)
+        member = members.get(int(uid)) if uid is not None else None
+        result.append({"client_id": client_id, "nickname": room.nicknames.get(client_id,"Guest"), "user_id": int(uid) if uid is not None else None, "role": member.get("role","viewer") if member else "guest", "can_control": bool(member.get("can_control")) if member else False, "can_manage_users": bool(member.get("can_manage_users")) if member else False, "can_manage_admins": bool(member.get("can_manage_admins")) if member else False, "is_muted": bool(member.get("is_muted")) if member else False, "is_banned": bool(member.get("is_banned")) if member else False})
+    return result
+
+async def broadcast_participants(room: Room) -> None:
+    await broadcast(room, {"type":"participants", "participants": await participants_payload(room)})
+
+async def broadcast_permissions(room: Room) -> None:
+    for client_id, websocket in list(room.clients.items()):
+        uid = room.client_users.get(client_id)
+        permission = await room_permission(room.room_id, int(uid) if uid is not None else None)
+        await send_json(websocket, {"type":"permission", "permission":permission})
+
+
 def normalized_login(value: Any) -> str:  
     return " ".join(str(value or "").split()).strip().lower()  
   
@@ -902,59 +919,39 @@ async def require_room_manager(request: Request, room_id: str) -> tuple[dict[str
     return user, permission  
   
   
-@app.post("/api/rooms/{room_id}/members")  
-async def manage_member(room_id: str, request: Request) -> dict[str, Any]:  
-    user, permission = await require_room_manager(request, room_id.upper())  
-    body = await request.json()  
-    target_id = int(body.get("user_id") or 0)  
-    action = str(body.get("action") or "").lower()  
-    target = await db_fetchone(  
-        "SELECT user_id, role FROM wt_room_members WHERE room_id = %s AND user_id = %s",  
-        (room_id.upper(), target_id),  
-    )  
-    if not target or target_id == user["id"]:  
-        raise HTTPException(status_code=404, detail="Участник не найден.")  
-    if action in {"set_admin", "remove_admin"} and not permission.get("can_manage_admins"):  
-        raise HTTPException(status_code=403, detail="Назначать админов может только владелец.")  
-    if action == "ban":  
-        await db_execute(  
-            "UPDATE wt_room_members SET is_banned = TRUE WHERE room_id = %s AND user_id = %s",  
-            (room_id.upper(), target_id),  
-        )  
-    elif action == "mute":  
-        await db_execute(  
-            "UPDATE wt_room_members SET is_muted = TRUE WHERE room_id = %s AND user_id = %s",  
-            (room_id.upper(), target_id),  
-        )  
-    elif action == "unmute":  
-        await db_execute(  
-            "UPDATE wt_room_members SET is_muted = FALSE WHERE room_id = %s AND user_id = %s",  
-            (room_id.upper(), target_id),  
-        )  
-    elif action in {"set_admin", "remove_admin"}:  
-        role = "admin" if action == "set_admin" else "viewer"  
-        await db_execute(  
-            """  
-            UPDATE wt_room_members  
-            SET role = %s, can_control = %s, can_manage_users = %s  
-            WHERE room_id = %s AND user_id = %s  
-            """,  
-            (role, role == "admin", role == "admin", room_id.upper(), target_id),  
-        )  
-    elif action.startswith("permission:"):  
-        key = action.split(":", 1)[1]  
-        if key not in {"can_control", "can_manage_users", "can_manage_admins"}:  
-            raise HTTPException(status_code=400, detail="Неизвестное право.")  
-        value = bool(body.get("value"))  
-        await db_execute(  
-            f"UPDATE wt_room_members SET {key} = %s WHERE room_id = %s AND user_id = %s",  
-            (value, room_id.upper(), target_id),  
-        )  
-    else:  
-        raise HTTPException(status_code=400, detail="Неизвестное действие.")  
-    return {"ok": True}  
-  
-  
+@app.post("/api/rooms/{room_id}/members")
+async def manage_member(room_id: str, request: Request) -> dict[str, Any]:
+    room_id = room_id.upper()
+    user, permission = await require_room_manager(request, room_id)
+    body = await request.json()
+    target_id = int(body.get("user_id") or 0)
+    action = str(body.get("action") or "").lower()
+    target = await db_fetchone("SELECT user_id, role, can_control, can_manage_users, can_manage_admins, is_muted, is_banned FROM wt_room_members WHERE room_id=%s AND user_id=%s", (room_id,target_id))
+    if not target or target_id == user["id"]: raise HTTPException(status_code=404, detail="Участник не найден.")
+    if target["role"] != "admin" and action != "set_admin": raise HTTPException(status_code=400, detail="Сначала назначьте участника администратором.")
+    if action in {"set_admin","remove_admin"}:
+        if not permission.get("can_manage_admins"): raise HTTPException(status_code=403, detail="Недостаточно прав для назначения админов.")
+        if action == "set_admin": await db_execute("UPDATE wt_room_members SET role='admin', can_control=TRUE, can_manage_users=TRUE WHERE room_id=%s AND user_id=%s",(room_id,target_id))
+        else: await db_execute("UPDATE wt_room_members SET role='viewer', can_control=FALSE, can_manage_users=FALSE, can_manage_admins=FALSE WHERE room_id=%s AND user_id=%s",(room_id,target_id))
+    elif action in {"ban","unban","mute","unmute"}:
+        if not permission.get("can_manage_users"): raise HTTPException(status_code=403, detail="Недостаточно прав для управления участниками.")
+        field="is_banned" if action in {"ban","unban"} else "is_muted"; value=action in {"ban","mute"}
+        await db_execute(f"UPDATE wt_room_members SET {field}=%s WHERE room_id=%s AND user_id=%s",(value,room_id,target_id))
+    elif action.startswith("permission:"):
+        if not permission.get("can_manage_admins"): raise HTTPException(status_code=403, detail="Недостаточно прав для изменения прав.")
+        key=action.split(":",1)[1]
+        if key not in {"can_control","can_manage_users","can_manage_admins"}: raise HTTPException(status_code=400, detail="Неизвестное право.")
+        await db_execute(f"UPDATE wt_room_members SET {key}=%s WHERE room_id=%s AND user_id=%s",(bool(body.get("value")),room_id,target_id))
+    else: raise HTTPException(status_code=400, detail="Неизвестное действие.")
+    room=rooms.get(room_id)
+    if room:
+        await broadcast_participants(room); await broadcast_permissions(room)
+        if action=="ban":
+            for cid,uid in list(room.client_users.items()):
+                if uid==target_id and cid in room.clients: await send_json(room.clients[cid],{"type":"error","message":"Вы заблокированы в этой комнате."})
+    return {"ok":True,"message":"Изменения применены."}
+
+
 @app.get("/api/rooms/{room_id}/polls")
 async def list_polls(room_id: str, request: Request) -> dict[str, Any]:
     user = await current_user(request)
@@ -1058,6 +1055,10 @@ async def create_poll(room_id: str, request: Request) -> dict[str, Any]:
         """,  
         (room_id.upper(), user["id"], question, Json(options)),  
     )  
+    if not poll:  
+        raise HTTPException(status_code=500, detail="Не удалось создать голосование.")  
+    # Immediately notify every connected client, including the creator.  
+    await broadcast_polls(room_id.upper())  
     return {"ok": True, "poll": poll}  
   
   
